@@ -137,7 +137,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.2";
+const APP_VER = "2.1.3";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -526,7 +526,7 @@ function listCustomers(text, limit){
   const t = normText(text); const ph = arDigits(text).trim();
   const out = [];
   for (const cu of DB.customers){
-    if (t && normText(cu.name).indexOf(t) < 0 && cu.phone.indexOf(ph) < 0) continue;
+    if (t && normText(cu.name).indexOf(t) < 0 && String(cu.phone || "").indexOf(ph) < 0) continue;
     const sales = DB.sales.filter(s => s.customer_id === cu.id);
     let bal = 0;
     for (const pl of DB.installment_plans.filter(p => p.customer_id === cu.id))
@@ -539,8 +539,8 @@ function listCustomers(text, limit){
 }
 async function updateCustomer(cid, name, phone){
   name = String(name || "").trim(); phone = arDigits(phone).trim();
-  if (!name || !phone) throw new Error("لازم اسم وتليفون");
-  if (DB.customers.some(c => c.phone === phone && c.id !== cid)) throw new Error("رقم التليفون ده متسجل لعميل تاني");
+  if (!name) throw new Error("لازم اسم العميل");
+  if (phone && DB.customers.some(c => c.phone === phone && c.id !== cid)) throw new Error("رقم التليفون ده متسجل لعميل تاني");
   const c = DB.customers.find(x => x.id === cid); if (!c) throw new Error("العميل مش موجود");
   if (c.name !== name || c.phone !== phone) await logAct("تعديل بيانات عميل", c.name + " (" + c.phone + ") ← " + name + " (" + phone + ")");
   c.name = name; c.phone = phone; saveSoon();
@@ -614,10 +614,11 @@ async function saleTx(d){
   if (d.plan){
     const name = String(d.plan.name || "").trim(); const phone = arDigits(d.plan.phone || "").trim();
     const down = Math.round(num(d.plan.down) * 100) / 100;
-    if (!name || !phone) throw new Error("القسط محتاج اسم العميل ورقم تليفونه");
+    const pcid = d.plan.customer_id ? +d.plan.customer_id : 0;
+    if (!name || (!phone && !pcid)) throw new Error("القسط محتاج اسم العميل ورقم تليفونه");
     if (down < 0 || down >= total) throw new Error("المقدم لازم يكون أقل من إجمالي الفاتورة");
-    let cu = DB.customers.find(c => c.phone === phone);
-    if (!cu){ cu = { id: nextId(DB.customers), name, phone, points: 0 }; DB.customers.push(cu); }
+    let cu = pcid ? DB.customers.find(c => c.id === pcid) : DB.customers.find(c => c.phone === phone);
+    if (!cu){ if (!phone) throw new Error("العميل مش موجود"); cu = { id: nextId(DB.customers), name, phone, points: 0 }; DB.customers.push(cu); }
     else cu.name = name;
     cid = cu.id; sale.customer_id = cid;
     const plan = { id: nextId(DB.installment_plans), sale_id: sale.id, customer_id: cid, down };
@@ -1595,27 +1596,29 @@ async function editItemPrice(c, v){
 }
 function pickCustomer(){
   const sh = sheet(`<h3>العميل</h3>
-    <input id="c-q" placeholder="دوّر بالاسم أو التليفون">
+    <input id="c-q" placeholder="دوّر أو اكتب اسم العميل (التليفون اختياري)">
     <div id="c-list"></div>
-    <button id="c-new">＋ عميل جديد بالتليفون ده</button>
+    <button id="c-new">＋ عميل جديد بالاسم ده</button>
     <button id="c-none" class="pick">بدون عميل</button>
     <button id="c-cancel" class="cancel">إلغاء</button>`);
   const q = sh.querySelector("#c-q"), list = sh.querySelector("#c-list");
   const draw = () => {
     list.innerHTML = "";
     listCustomers(q.value, 10).forEach(c => {
-      const b = el("button", "pick", `${c.name} — ${c.phone} (عليه ${money(c.bal)} ج، نقاط ${money(c.points)})`);
+      const b = el("button", "pick", `${c.name}${c.phone ? " — " + c.phone : ""} (عليه ${money(c.bal)} ج، نقاط ${money(c.points)})`);
       b.onclick = () => { curCustomer = DB.customers.find(x => x.id === c.id); closeModal(); drawCartTotals(); };
       list.appendChild(b);
     });
   };
   q.addEventListener("input", draw); draw();
   sh.querySelector("#c-new").onclick = () => {
-    const phone = arDigits(q.value).trim();
-    if (!/^\d{6,15}$/.test(phone)){ toast("اكتب رقم التليفون في خانة البحث الأول", true); return; }
-    const name = prompt("اسم العميل:"); if (!name || !name.trim()) return;
-    if (findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
-    const c = { id: nextId(DB.customers), name: name.trim(), phone, points: 0 };
+    const txt = arDigits(q.value).trim();
+    let name = txt, phone = "";
+    if (/^\d{6,15}$/.test(txt)){ phone = txt; name = (prompt("اسم العميل:") || "").trim(); }   // كتب رقم: بنسأل عن الاسم
+    if (!name){ toast("اكتب اسم العميل في الخانة اللي فوق", true); return; }
+    if (phone && findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
+    if (!phone && DB.customers.some(x => normText(x.name) === normText(name)) && !confirm("فيه عميل بنفس الاسم ده. تضيف عميل جديد برضه؟")) return;
+    const c = { id: nextId(DB.customers), name, phone, points: 0 };
     DB.customers.push(c); saveSoon(); curCustomer = c; closeModal(); drawCartTotals();
   };
   sh.querySelector("#c-none").onclick = () => { curCustomer = null; closeModal(); drawCartTotals(); };
@@ -1677,7 +1680,7 @@ async function finish(){
       if (!curCustomer){ toast("اختار العميل الأول للقسط", true); pickCustomer(); return; }
       const owed = DB.installment_plans.filter(p => p.customer_id === curCustomer.id).reduce((q,p) => q + planOutstanding(p.id), 0);
       if (owed > 0 && !confirm("تنبيه: العميل ده عليه متبقي " + money(owed) + " ج من أقساط قديمة — متأكد عايز تبيع له بالقسط كمان؟")) return;
-      d.plan = { name: curCustomer.name, phone: curCustomer.phone, down: num($("#downPay").value) };
+      d.plan = { name: curCustomer.name, phone: curCustomer.phone || "", customer_id: curCustomer.id, down: num($("#downPay").value) };
     } else if ($("#received").value.trim() !== "") d.received = $("#received").value;
     $("#finishBtn").disabled = true;
     const r = await makeSale(d);
@@ -2048,9 +2051,8 @@ function drawCustomers(){
   $("#cuSearch").addEventListener("input", drawCustList);
   $("#newCustBtn").onclick = () => {
     const name = prompt("اسم العميل:"); if (!name || !name.trim()) return;
-    const phone = arDigits(prompt("رقم التليفون:") || "").trim();
-    if (!phone){ toast("لازم رقم تليفون", true); return; }
-    if (findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
+    const phone = arDigits(prompt("رقم التليفون (اختياري، سيبه فاضي لو مش عايز):") || "").trim();
+    if (phone && findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
     DB.customers.push({ id: nextId(DB.customers), name: name.trim(), phone, points: 0 });
     saveSoon(); drawCustList(); toast("اتحفظ العميل");
   };
@@ -2076,7 +2078,7 @@ function customerSheet(cid){
   const c = DB.customers.find(x => x.id === cid); if (!c) return;
   const plans = DB.installment_plans.filter(p => p.customer_id === cid);
   const cfg = loyaltyCfg();
-  const sh = sheet(`<h3>${esc(c.name)} — ${esc(c.phone)}</h3>
+  const sh = sheet(`<h3>${esc(c.name)}${c.phone ? " — " + esc(c.phone) : ""}</h3>
     ${cfg.on ? `<div class="muted">نقاط الولاء: <b>${money(+c.points || 0)}</b>${cfg.point_value > 0 ? " (تساوي خصم " + money((+c.points || 0) * cfg.point_value) + " ج)" : ""}</div>` : ""}
     <div id="cu-plans"></div>
     <button id="cu-collect" class="primary" style="display:none">تحصيل قسط</button>
@@ -2115,7 +2117,7 @@ function customerSheet(cid){
   sh.querySelector("#cu-stmt").onclick = () => { closeModal(); showStatement(cid); };
   sh.querySelector("#cu-edit").onclick = async () => {
     const name = prompt("الاسم:", c.name); if (name == null) return;
-    const phone = prompt("التليفون:", c.phone); if (phone == null) return;
+    const phone = prompt("التليفون (اختياري):", c.phone || ""); if (phone == null) return;
     try { await updateCustomer(cid, name, phone); closeModal(); drawCustList(); toast("اتحفظ"); }
     catch (e){ toast(e.message, true); }
   };
