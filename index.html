@@ -148,7 +148,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.2.1";
+const APP_VER = "2.2.2";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -1487,7 +1487,7 @@ window.addEventListener("unhandledrejection", e => { const r = e.reason; errBar(
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 function toast(msg, bad){ const t = $("#toast"); t.textContent = msg; t.className = "show" + (bad ? " bad" : ""); setTimeout(() => t.className = "", 3000); }
 function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function closeModal(){ $("#modal").classList.remove("on"); $("#modal").innerHTML = ""; }
+function closeModal(){ try { stopScanner(); } catch (e){} $("#modal").classList.remove("on"); $("#modal").innerHTML = ""; }
 function sheet(html){
   const m = $("#modal"); m.innerHTML = '<div class="sheet">' + html + "</div>";
   m.classList.add("on"); return m.firstChild;
@@ -1637,7 +1637,7 @@ function drawSale(){
   <div class="scan-row">
     <input id="scan" placeholder="امسح باركود أو اكتب اسم الصنف (٣*باركود للكمية)" autocomplete="off">
     <button id="scanBtn" class="primary">إضافة</button>
-    <label class="cam"><button type="button">📷</button><input id="camInput" type="file" accept="image/*" capture="environment"></label>
+    <button id="camBtn" type="button" title="مسح بالكاميرا">📷</button><input id="camInput" type="file" accept="image/*" capture="environment" style="display:none">
     <button id="scanModeBtn" class="cancel" type="button">⌨</button>
   </div>
   <div id="favRow" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
@@ -1688,6 +1688,7 @@ function drawSale(){
     }, 150);
   });
   $("#scanBtn").onclick = () => { scanAdd($("#scan").value); $("#scan").value = ""; };
+  $("#camBtn").onclick = openScanner;
   $("#camInput").addEventListener("change", e => { if (e.target.files[0]) scanPhoto(e.target.files[0]); e.target.value = ""; });
   $("#custBtn").onclick = pickCustomer;
   const sel = $("#sellerSel");
@@ -2011,24 +2012,113 @@ function showReceipt(sid){
   if (getSetting("auto_print") === "1"){ try { window.print(); } catch (e){} }
 }
 
-// ---------- فك الباركود من صورة (الكاميرا) ----------
+// ---------- قراءة الباركود بالكاميرا (فيديو مباشر + صورة احتياطي) ----------
+const BC_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "codabar", "qr_code"];
+let _scan = null, _bcDet = null, _zxReader = null;
+function zxReader(){
+  if (_zxReader || typeof ZXing === "undefined") return _zxReader;
+  const h = new Map(), F = ZXing.BarcodeFormat;
+  h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.CODABAR, F.QR_CODE].filter(x => x != null));
+  h.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const r = new ZXing.MultiFormatReader(); r.setHints(h); _zxReader = r; return r;
+}
+// بيحاول يفك الباركود من canvas. أي فشل "مفيش باركود" (NotFound/Checksum/Format) بيرجّع "" ومش خطأ.
+async function decodeCanvas(cv){
+  try {
+    if (typeof BarcodeDetector !== "undefined"){
+      if (!_bcDet){
+        let fm = BC_FORMATS; try { const sup = await BarcodeDetector.getSupportedFormats(); fm = BC_FORMATS.filter(x => sup.indexOf(x) >= 0); } catch (e){}
+        _bcDet = fm.length ? new BarcodeDetector({ formats: fm }) : false;
+      }
+      if (_bcDet){ const r = await _bcDet.detect(cv); if (r && r.length && r[0].rawValue) return r[0].rawValue; }
+    }
+  } catch (e){}
+  const rd = zxReader(); if (!rd) return "";
+  const tryRect = (sx, sy, sw, sh) => {
+    try {
+      const c2 = document.createElement("canvas"); c2.width = sw; c2.height = sh;
+      const x2 = c2.getContext("2d", { willReadFrequently: true }); x2.drawImage(cv, sx, sy, sw, sh, 0, 0, sw, sh);
+      const d = x2.getImageData(0, 0, sw, sh);
+      // ZXing بياخد صورة رمادي (بايت واحد للبيكسل) مش RGBA. تمرير RGBA كان سبب إن القراءة مابتنجحش
+      const gray = new Uint8ClampedArray(sw * sh), px = d.data;
+      for (let i = 0, j = 0; j < gray.length; i += 4, j++) gray[j] = (px[i] * 306 + px[i + 1] * 601 + px[i + 2] * 117) >> 10;
+      const src = new ZXing.RGBLuminanceSource(gray, sw, sh);
+      for (const B of [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer]){
+        try { const res = rd.decode(new ZXing.BinaryBitmap(new B(src))); const t = res && res.getText ? res.getText() : ""; if (t) return t; } catch (e){}
+      }
+    } catch (e){}
+    return "";
+  };
+  const W = cv.width, H = cv.height;
+  return tryRect(0, 0, W, H) || tryRect(Math.round(W * 0.1), Math.round(H * 0.3), Math.round(W * 0.8), Math.round(H * 0.4));
+}
+function stopScanner(){ if (_scan){ const s = _scan; _scan = null; s.stop(); } }
+function camErrorText(e){
+  const n = e && e.name;
+  if (n === "NotAllowedError" || n === "SecurityError") return "الكاميرا مش مسموحة. افتح إعدادات المتصفح واسمح للتطبيق بالكاميرا، أو اكتب الباركود.";
+  if (n === "NotFoundError" || n === "OverconstrainedError" || n === "DevicesNotFoundError") return "مفيش كاميرا شغالة على الموبايل ده. اكتب الباركود.";
+  if (n === "NotReadableError" || n === "AbortError") return "الكاميرا مشغولة بتطبيق تاني. اقفله وجرب تاني، أو اكتب الباركود.";
+  return "الكاميرا ماشتغلتش. جرب تاني أو اكتب الباركود.";
+}
+async function openScanner(){
+  stopScanner();
+  const sh = sheet(`<h3>مسح بالكاميرا</h3>
+    <div class="scanbox" style="position:relative;background:#000;border-radius:12px;overflow:hidden;min-height:160px">
+      <video id="sc-v" playsinline muted autoplay style="width:100%;max-height:42vh;object-fit:cover;display:block"></video>
+      <div style="position:absolute;left:8%;right:8%;top:50%;height:2px;background:rgba(255,60,60,.85)"></div></div>
+    <div id="sc-msg" class="muted" style="margin:8px 0">وجّه الكاميرا على الباركود وثبّت إيدك، وقرّب لحد ما يتفتح.</div>
+    <div class="row2"><button id="sc-photo" type="button">📷 صورة</button><button id="sc-type" type="button">⌨ اكتب الباركود</button></div>
+    <button id="sc-x" class="cancel" type="button">قفل</button>`);
+  const msg = sh.querySelector("#sc-msg"), vid = sh.querySelector("#sc-v");
+  const typeIt = () => { stopScanner(); closeModal(); const i = $("#scan"); if (i){ i.focus(); } };
+  sh.querySelector("#sc-x").onclick = () => { stopScanner(); closeModal(); };
+  sh.querySelector("#sc-type").onclick = typeIt;
+  sh.querySelector("#sc-photo").onclick = () => { stopScanner(); closeModal(); $("#camInput").click(); };
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ msg.textContent = "المتصفح ده مابيفتحش الكاميرا من جوه التطبيق. دوس «صورة» أو اكتب الباركود."; return; }
+  let stream = null, alive = true, timer = null;
+  const state = { stop(){ alive = false; clearTimeout(timer); try { vid.pause(); } catch (e){} if (stream) stream.getTracks().forEach(t => t.stop()); } };
+  _scan = state;
+  try {
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }); }
+    catch (e1){ if (e1 && (e1.name === "OverconstrainedError" || e1.name === "NotFoundError")) stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); else throw e1; }
+    if (!alive){ stream.getTracks().forEach(t => t.stop()); return; }
+    const tr = stream.getVideoTracks()[0];
+    try { const caps = tr.getCapabilities ? tr.getCapabilities() : {}; const adv = {}; if (caps.focusMode && caps.focusMode.indexOf("continuous") >= 0) adv.focusMode = "continuous"; if (Object.keys(adv).length) await tr.applyConstraints({ advanced: [adv] }); } catch (e){}
+    vid.srcObject = stream; try { await vid.play(); } catch (e){}
+  } catch (e){ state.stop(); msg.textContent = camErrorText(e); msg.style.color = "var(--bad)"; return; }
+  const cv = document.createElement("canvas"); const cx = cv.getContext("2d", { willReadFrequently: true });
+  let busy = false, n = 0;
+  const loop = async () => {
+    if (!alive) return;
+    if (!busy && vid.videoWidth > 0){
+      busy = true;
+      try {
+        const sc = Math.min(1, 1280 / vid.videoWidth); cv.width = Math.round(vid.videoWidth * sc); cv.height = Math.round(vid.videoHeight * sc);
+        cx.drawImage(vid, 0, 0, cv.width, cv.height);
+        const code = await decodeCanvas(cv);
+        if (code && alive){ stopScanner(); closeModal(); try { navigator.vibrate && navigator.vibrate(60); } catch (e){} scanAdd(code); return; }
+      } catch (e){}
+      busy = false; n++;
+      if (n === 60 && alive) msg.textContent = "لسه مش قادر يقرا. قرّب شوية، ظبّط الإضاءة، أو اكتب الباركود.";
+    }
+    timer = setTimeout(loop, 120);
+  };
+  loop();
+}
 async function scanPhoto(file){
   try {
-    if (typeof ZXing === "undefined") throw new Error("قارئ الباركود مش متحمّل");
     toast("بنقرأ الصورة...");
     const bmp = await createImageBitmap(file);
-    const cv = document.createElement("canvas"); cv.width = bmp.width; cv.height = bmp.height;
-    const ctx = cv.getContext("2d", { willReadFrequently: true }); ctx.drawImage(bmp, 0, 0);
-    const d = ctx.getImageData(0, 0, cv.width, cv.height);
-    const src = new ZXing.RGBLuminanceSource(new Uint8ClampedArray(d.data.buffer), cv.width, cv.height);
-    const bmp2 = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src));
-    const res = new ZXing.MultiFormatReader().decode(bmp2);
-    const code = res && res.getText ? res.getText() : "";
-    if (!code) throw new Error("مفيش باركود واضح في الصورة");
+    let code = "";
+    for (const mw of [1600, 1000, 2400]){
+      const sc = Math.min(1, mw / Math.max(bmp.width, bmp.height));
+      const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+      cv.getContext("2d", { willReadFrequently: true }).drawImage(bmp, 0, 0, cv.width, cv.height);
+      code = await decodeCanvas(cv); if (code) break;
+    }
+    if (!code){ toast("مش لاقي باركود واضح في الصورة. قرّب وثبّت الكاميرا أو اكتب الباركود.", true); return; }
     scanAdd(code);
-  } catch (e){
-    toast(e && e.name === "NotFoundException" ? "مفيش باركود واضح في الصورة" : "مش قادر أقرا الباركود: " + (e.message || e.name || e), true);
-  }
+  } catch (e){ toast("مش قادر أفتح الصورة. جرب تاني أو اكتب الباركود.", true); }
 }
 
 function downloadText(fname, text, mime){
