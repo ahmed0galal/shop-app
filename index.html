@@ -54,6 +54,7 @@ nav .ico{ font-size:20px; display:block; }
 #modal.on{ display:flex; align-items:flex-end; justify-content:center; }
 .sheet{ background:var(--bg); border-radius:16px 16px 0 0; padding:16px; width:100%; max-width:640px; max-height:88vh; overflow:auto; }
 .sheet h3{ margin-top:0; }
+.sv-pending{ color:#b45309; } .sv-bad{ color:#b91c1c; font-weight:bold; } .sv-offline{ color:var(--muted); }
 #dlg{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50; }
 #dlg.on{ display:flex; align-items:center; justify-content:center; padding:16px; }
 .dbox{ background:var(--bg); border-radius:16px; padding:16px; width:100%; max-width:420px; max-height:88vh; overflow:auto; }
@@ -106,7 +107,7 @@ table.grid input{ padding:6px; font-size:14px; text-align:center; }
 <header>
   <button id="lockBtn" title="قفل/دخول">🔓</button>
   <h1 id="appTitle">برنامج المحل</h1>
-  <span class="who" id="whoLbl"></span>
+  <span class="who" id="saveSt">💾 محفوظ</span><span class="who" id="whoLbl"></span>
   <button id="darkBtn" title="فاتح/غامق">🌙</button>
 </header>
 
@@ -147,19 +148,20 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.5";
+const APP_VER = "2.2.0";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
   backup_dir2:"", pin_hash:"", receipt:"A5", auto_print:"0",
   loyalty_on:"1", loyalty_earn_per:"100", loyalty_point_value:"1",
-  max_discount:"20", pin_fails:"0", pin_lock_until:"", dark_mode:"0" };
+  max_discount:"20", pin_fails:"0", pin_lock_until:"", dark_mode:"0", idle_min:"10", perms_v22:"" };
 const PERMS = [["discount","خصم أو سعر فوق الحد المسموح"],["ret","مرتجع واستبدال"],["cancel","إلغاء فاتورة"],
-  ["edit","تعديل الأصناف والكميات والجرد"],["reports","فتح صفحة التقارير"]];
+  ["edit","تعديل الأصناف والكميات والجرد"],["reports","فتح صفحة التقارير"],
+  ["expenses","المصروفات"],["collect","تحصيل الأقساط"],["purchases","المشتريات والموردين"]];
 const EXP_CATS = ["إيجار","كهربا ومرافق","مرتبات","نقل وشحن",DRAW,"أخرى"];
 const TABLES = ["products","variants","sales","sale_items","sale_tokens","returns","suppliers","purchases",
   "purchase_items","customers","installment_plans","installments","installment_payments","supplier_payments",
-  "expenses","stock_moves","supplier_returns","activity_log","held_carts","employees","pin_log","points_moves","price_history"];
+  "expenses","stock_moves","supplier_returns","activity_log","held_carts","employees","pin_log","points_moves","price_history","day_closings"];
 
 // ---------- أدوات عامة ----------
 const AR_DIGITS_S = "٠١٢٣٤٥٦٧٨٩";
@@ -204,18 +206,57 @@ function randHex(n){ const b = new Uint8Array(n); (crypto.getRandomValues ? cryp
 
 // ---------- التخزين ----------
 let _store = null;
-function setStore(s){ _store = s; }
+function setStore(s){ _store = s; _rev = null; _conflict = false; }
 const DB = { settings: Object.assign({}, DEFAULTS) };
 for (const t of TABLES) DB[t] = [];
-function nextId(arr){ let m = 0; for (const r of arr) if (r.id > m) m = r.id; return m + 1; }
+// أكبر رقم متخزّن لكل مصفوفة: بنفحص بس الصفوف الجديدة اللي اتضافت (بدل مسح المصفوفة كلها كل مرة)
+const _idCache = new WeakMap();
+function nextId(arr){
+  let c = _idCache.get(arr);
+  if (!c || arr.length < c.len){ c = { len: 0, max: 0 }; }
+  for (let i = c.len; i < arr.length; i++){ const id = arr[i].id; if (id > c.max) c.max = id; }
+  c.len = arr.length; _idCache.set(arr, c);
+  const out = c.max + 1; c.max = out; return out;   // الرقم المحجوز يتعدّ كأنه اتضاف (الصف هيتضاف بعده)
+}
+// ---------- عملية "كلها أو ولا حاجة": لو فشلت في النص بنرجّع كل حاجة زي ما كانت ----------
+function txSnap(){
+  const s = { settings: Object.assign({}, DB.settings), t: {} };
+  for (const t of TABLES){ const arr = DB[t]; s.t[t] = { arr, items: arr.slice(), rows: arr.map(r => [r, r && typeof r === "object" ? Object.assign({}, r) : r]) }; }
+  return s;
+}
+function txRestore(s){
+  for (const k of Object.keys(DB.settings)) delete DB.settings[k];
+  Object.assign(DB.settings, s.settings);
+  for (const t of TABLES){
+    const e = s.t[t]; DB[t] = e.arr; e.arr.length = 0;
+    for (const r of e.items) e.arr.push(r);
+    for (const [r, c] of e.rows){ if (r && typeof r === "object"){ for (const k of Object.keys(r)) delete r[k]; Object.assign(r, c); } }
+  }
+  _idCache.delete && TABLES.forEach(t => _idCache.delete(DB[t]));
+}
+async function tx(fn){
+  const s = txSnap();
+  try { return await fn(); } catch (e){ txRestore(s); throw e; }
+}
+// للعمليات اللي بترجّع {ok:false} بدل ما ترمي: لو رجعت ok:false بنرجّع كل التغييرات
+async function txOp(fn){
+  const s = txSnap();
+  try { const r = await fn(); if (r && r.ok === false) txRestore(s); return r; }
+  catch (e){ txRestore(s); throw e; }
+}
 
 async function loadAll(){
+  const rv = await _store.get("shopdb2_rev"); _rev = rv === undefined ? "" : rv; _conflict = false;
   const d = await _store.get("shopdb2");
   if (d && typeof d === "object"){
     // حتى لو السجل ناقص (settings مثلًا) مانمسحوش حاجة: بنحفظ نسخة خام ونكمّل بالموجود
     if (!d.settings){ try { await _store.set("shopdb2_raw_" + Date.now(), d); } catch (e){} }
     DB.settings = Object.assign({}, DEFAULTS, d.settings || {});
     for (const t of TABLES) DB[t] = Array.isArray(d[t]) ? d[t] : [];
+    if (DB.settings.perms_v22 !== "1"){   // ترقية 2.2: الموظفين الحاليين ياخدوا الصلاحيات الجديدة عشان شغلهم ماينقطعش، والمدير يشيلها لو عايز
+      for (const e of DB.employees){ const cur = String(e.perms || "").split(",").filter(Boolean); for (const k of ["expenses", "collect", "purchases"]) if (cur.indexOf(k) < 0) cur.push(k); e.perms = cur.join(","); }
+      DB.settings.perms_v22 = "1";
+    }
     return;
   }
   // ترحيل بيانات إصدار الموبايل القديم (1.x) لو موجودة
@@ -223,15 +264,52 @@ async function loadAll(){
   if (old){ await migrateFromV1(); return; }
   await saveAll();
 }
+let _rev = null, _conflict = false, _dirty = false;
+const MULTI_TAB_MSG = "التطبيق مفتوح في مكان تاني (المتصفح أو الأيقونة) واتحفظت فيه بيانات أحدث. اقفل التاني وافتح التطبيق من جديد عشان ماتضيعش حاجة.";
 async function saveAll(){
-  const d = { schema: SCHEMA_V, settings: DB.settings };
-  for (const t of TABLES) d[t] = DB[t];
-  await _store.set("shopdb2", d);
+  if (_conflict){ setSaveStatus("bad"); throw new Error(MULTI_TAB_MSG); }
+  const run = async () => {
+    const cur = await _store.get("shopdb2_rev");
+    if (_rev !== null && (cur === undefined ? "" : cur) !== _rev){ _conflict = true; setSaveStatus("bad"); throw new Error(MULTI_TAB_MSG); }
+    _dirty = false;
+    const d = { schema: SCHEMA_V, settings: DB.settings };
+    for (const t of TABLES) d[t] = DB[t];
+    const nr = randHex(8);
+    await _store.set("shopdb2", d);
+    await _store.set("shopdb2_rev", nr); _rev = nr;
+    if (!_dirty) setSaveStatus(typeof navigator !== "undefined" && navigator.onLine === false ? "offline" : "ok");
+  };
+  if (typeof navigator !== "undefined" && navigator.locks && navigator.locks.request) return navigator.locks.request("shopdb2-save", run);
+  return run();
+}
+function setSaveStatus(kind){
+  if (typeof document === "undefined") return; const e = document.getElementById("saveSt"); if (!e) return;
+  e.textContent = kind === "pending" ? "⏳ بيحفظ…" : kind === "bad" ? "⚠️ مش محفوظ!" : kind === "offline" ? "📴 من غير نت (شغال عادي)" : "💾 محفوظ";
+  e.className = "who sv-" + kind;
 }
 let _saveT = null;
 function saveSoon(){
+  _dirty = true; setSaveStatus("pending");
   if (_saveT) clearTimeout(_saveT);
-  _saveT = setTimeout(() => { _saveT = null; saveAll().catch(e => errBarSafe("مشكلة في الحفظ: " + (e.message || e))); }, 300);
+  _saveT = setTimeout(() => { _saveT = null; saveAll().catch(e => { setSaveStatus("bad"); errBarSafe("مشكلة في الحفظ: " + (e.message || e)); }); }, 300);
+}
+// حفظ فوري (بعد البيع والمرتجع والتحصيل): بنستنى الحفظ يخلص
+async function saveNow(){
+  if (_saveT){ clearTimeout(_saveT); _saveT = null; }
+  await saveAll();
+}
+// لما الصفحة تتخبّى أو تتقفل: احفظ اللي معلّق فورًا
+function flushSave(){
+  if (_saveT){ clearTimeout(_saveT); _saveT = null; }
+  if (_dirty && _store && !_conflict) saveAll().catch(e => errBarSafe("مشكلة في الحفظ: " + (e.message || e)));
+}
+// لما ترجع للتطبيق: لو شاشة تانية حفظت بيانات أحدث وإحنا مفيش عندنا تعديلات معلّقة، حمّل الأحدث
+async function refreshIfStale(){
+  if (!_store || _conflict || _rev === null) return false;
+  const cur = await _store.get("shopdb2_rev"); const c = cur === undefined ? "" : cur;
+  if (c === _rev) return false;
+  if (_dirty){ _conflict = true; errBarSafe(MULTI_TAB_MSG); return false; }
+  await loadAll(); return true;
 }
 function errBarSafe(m){ if (typeof errBar === "function") errBar(m); }
 
@@ -399,11 +477,11 @@ async function logAct(action, details){
   const ts = now();
   const hash = await sha256Hex(prev + "|" + ts + "|" + action + "|" + (details || ""));
   DB.activity_log.push({ id: nextId(DB.activity_log), ts, action, details: details || "", prev, hash });
-  if (DB.activity_log.length > 5000) DB.activity_log = DB.activity_log.slice(-4000);
+  if (DB.activity_log.length > 20000) DB.activity_log = DB.activity_log.slice(-15000);
   saveSoon();
 }
 async function verifyActivity(){
-  let prev = "";
+  let prev = DB.activity_log.length ? DB.activity_log[0].prev : "";   // السجل بيتقص من الأول، فبنبدأ من أول سجل موجود
   for (const r of DB.activity_log){
     if (r.prev !== prev) return { ok: false, at: r.id, why: "الحلقة السابقة مختلفة" };
     const h = await sha256Hex(r.prev + "|" + r.ts + "|" + r.action + "|" + (r.details || ""));
@@ -584,6 +662,17 @@ async function saleTx(d){
       }
     }
   }
+  // التحقق من القسط قبل أي تعديل في البيانات
+  let planInfo = null;
+  if (d.plan){
+    const name = String(d.plan.name || "").trim(); const phone = arDigits(d.plan.phone || "").trim();
+    const down = Math.round(num(d.plan.down) * 100) / 100;
+    const pcid = d.plan.customer_id ? +d.plan.customer_id : 0;
+    if (!name || (!phone && !pcid)) throw new Error("القسط محتاج اسم العميل ورقم تليفونه");
+    if (down < 0 || down >= total) throw new Error("المقدم لازم يكون أقل من إجمالي الفاتورة");
+    if (pcid && !DB.customers.find(c => c.id === pcid)) throw new Error("العميل مش موجود");
+    planInfo = { name, phone, down, pcid };
+  }
   const cfg = loyaltyCfg(); let redeem = 0; let cid = null;
   const cust = d.customer || {};
   const cphone = arDigits(cust.phone || "").trim();
@@ -622,11 +711,7 @@ async function saleTx(d){
     logMove(L.v.id, -L.q, "بيع فاتورة " + sale.id);
   }
   if (d.plan){
-    const name = String(d.plan.name || "").trim(); const phone = arDigits(d.plan.phone || "").trim();
-    const down = Math.round(num(d.plan.down) * 100) / 100;
-    const pcid = d.plan.customer_id ? +d.plan.customer_id : 0;
-    if (!name || (!phone && !pcid)) throw new Error("القسط محتاج اسم العميل ورقم تليفونه");
-    if (down < 0 || down >= total) throw new Error("المقدم لازم يكون أقل من إجمالي الفاتورة");
+    const { name, phone, down, pcid } = planInfo;
     let cu = pcid ? DB.customers.find(c => c.id === pcid) : DB.customers.find(c => c.phone === phone);
     if (!cu){ if (!phone) throw new Error("العميل مش موجود"); cu = { id: nextId(DB.customers), name, phone, points: 0 }; DB.customers.push(cu); }
     else cu.name = name;
@@ -635,7 +720,7 @@ async function saleTx(d){
     DB.installment_plans.push(plan);
     // رصيد على العميل من غير مواعيد: صف واحد بالمتبقي والسداد في أي وقت
     DB.installments.push({ id: nextId(DB.installments), plan_id: plan.id, due_date: todayStr(), amount: Math.round((total - down) * 100) / 100, paid: 0 });
-    if (down > 0) DB.installment_payments.push({ id: nextId(DB.installment_payments), ts: now(), plan_id: plan.id, amount: down, note: "مقدم" });
+    if (down > 0) DB.installment_payments.push({ id: nextId(DB.installment_payments), ts: now(), user_name: SESSION.name || "", plan_id: plan.id, amount: down, note: "مقدم" });
     sale.payment = "قسط";
   }
   if (cid && cfg.on){
@@ -645,7 +730,8 @@ async function saleTx(d){
   }
   return sale;
 }
-async function makeSale(d){
+function makeSale(d){ return txOp(() => _makeSale(d)); }
+async function _makeSale(d){
   const tok = String(d.token || "").slice(0, 64);
   if (tok){
     const old = DB.sale_tokens.find(t => t.token === tok);
@@ -654,7 +740,8 @@ async function makeSale(d){
   try {
     const sale = await saleTx(d);
     if (tok) DB.sale_tokens.push({ token: tok, sale_id: sale.id });
-    saveSoon();
+    await logAct("بيع", "فاتورة " + sale.id + "، " + money(sale.total) + " ج، " + sale.payment + (sale.user_name ? "، " + sale.user_name : ""));
+    await saveNow();
     return { ok: true, id: sale.id };
   } catch (e){ return { ok: false, error: e.message }; }
 }
@@ -680,31 +767,39 @@ function returnTx(sid, vid, qty){
     }
   }
   const cash = Math.round((refund - cutTotal) * 100) / 100;
-  DB.returns.push({ id: nextId(DB.returns), ts: now(), sale_id: sid, variant_id: vid, qty, refund, cost: item.cost, cash_out: cash });
+  DB.returns.push({ id: nextId(DB.returns), ts: now(), user_name: SESSION.name || "", sale_id: sid, variant_id: vid, qty, refund, cost: item.cost, cash_out: cash });
   const v = getVariant(vid); if (v){ v.qty += qty; logMove(vid, qty, "مرتجع من فاتورة " + sid); }
   return { refund, cut: Math.round(cutTotal * 100) / 100, cash, plan: !!plan };
 }
-async function doReturn(sid, vid, qty){
+function doReturn(sid, vid, qty){ return txOp(() => _doReturn(sid, vid, qty)); }
+async function _doReturn(sid, vid, qty){
   try {
-    const r = returnTx(sid, vid, qty); saveSoon();
+    const r = returnTx(sid, vid, qty);
+    await logAct("مرتجع", "فاتورة " + sid + "، " + money(r.refund) + " ج" + (SESSION.name ? "، " + SESSION.name : ""));
+    await saveNow();
     if (r.plan) return { ok: true, msg: "تم المرتجع (فاتورة قسط). اتخصم " + money(r.cut) + " من المتبقي على العميل، ويتردّ له نقدًا " + money(r.cash) + " جنيه. القطعة رجعت المخزون." };
     return { ok: true, msg: "تم المرتجع. رجّع للعميل " + money(r.refund) + " جنيه والقطعة رجعت المخزون." };
   } catch (e){ return { ok: false, msg: e.message }; }
 }
-async function doExchange(sid, vid, qty, newVid, newQty){
+function doExchange(sid, vid, qty, newVid, newQty){ return txOp(() => _doExchange(sid, vid, qty, newVid, newQty)); }
+async function _doExchange(sid, vid, qty, newVid, newQty){
   if (+newVid === +vid) return { ok: false, msg: "اختار صنف مختلف عن المرتجع — الاستبدال بنفس القطعة مالوش معنى.", sale_id: null, diff: 0 };
   try {
+    const nv = getVariant(newVid), nq = Math.trunc(num(newQty));
+    if (!nv || nq < 1 || nv.qty < nq) throw new Error("الصنف الجديد مش متاح بالكمية دي في المخزون — الاستبدال ماتسجلش.");
     const r = returnTx(sid, vid, qty);
     const sale = await saleTx({ items: [{ id: newVid, q: newQty }], payment: "كاش" });
     const diff = Math.round((sale.total - r.cash) * 100) / 100;
     let msg = "تم الاستبدال. قيمة المرتجع " + money(r.refund) + " والصنف الجديد " + money(sale.total) + ". ";
     if (r.plan) msg += "اتخصم " + money(r.cut) + " من المتبقي على العميل. ";
+    await logAct("استبدال", "فاتورة " + sid + "، مرتجع " + money(r.refund) + " والجديد " + money(sale.total) + (SESSION.name ? "، " + SESSION.name : ""));
     msg += diff > 0.004 ? "العميل يدفع فرق " + money(diff) + " جنيه." : diff < -0.004 ? "رجّع للعميل " + money(-diff) + " جنيه." : "من غير فرق.";
-    saveSoon();
+    await saveNow();
     return { ok: true, msg, sale_id: sale.id, diff };
   } catch (e){ return { ok: false, msg: e.message, sale_id: null, diff: 0 }; }
 }
-async function cancelSale(sid){
+function cancelSale(sid){ return txOp(() => _cancelSale(sid)); }
+async function _cancelSale(sid){
   try {
     const sale = DB.sales.find(s => s.id === sid);
     if (!sale) throw new Error("مفيش فاتورة بالرقم ده.");
@@ -719,7 +814,7 @@ async function cancelSale(sid){
       if (Math.abs(netPts) > 0.004) addPoints(sale.customer_id, -netPts, sid, "عكس نقاط إلغاء فاتورة " + sid);
     }
     await logAct("إلغاء فاتورة", "فاتورة رقم " + sid + "، إجمالي المرتجع " + money(tr) + " جنيه");
-    saveSoon();
+    await saveNow();
     return { ok: true, msg: "اتلغت الفاتورة " + sid + ": إجمالي المرتجع " + money(tr) + " جنيه، اتخصم " + money(tc) + " من المتبقي على العميل، ويتردّ نقدًا " + money(tcash) + " جنيه." };
   } catch (e){ return { ok: false, msg: e.message }; }
 }
@@ -745,7 +840,8 @@ function addSupplier(name, phone){
   s = { id: nextId(DB.suppliers), name, phone: arDigits(phone || "").trim() };
   DB.suppliers.push(s); saveSoon(); return s;
 }
-async function makePurchase(supplierId, lines, paid, token){
+function makePurchase(supplierId, lines, paid, token){ return txOp(() => _makePurchase(supplierId, lines, paid, token)); }
+async function _makePurchase(supplierId, lines, paid, token){
   if (!lines.length) return { ok: false, error: "الفاتورة فاضية" };
   try {
     const old = DB.purchases.find(p => p.token === token);
@@ -755,7 +851,7 @@ async function makePurchase(supplierId, lines, paid, token){
     if (paid < 0) throw new Error("المدفوع للمورد مينفعش يبقى بالسالب");
     if (paid > total + 0.005) throw new Error("المدفوع (" + money(paid) + ") أكبر من إجمالي المشتريات (" + money(total) + ")");
     paid = Math.min(paid, total);
-    const pur = { id: nextId(DB.purchases), ts: now(), supplier_id: supplierId, total, paid, token: token || "" };
+    const pur = { id: nextId(DB.purchases), ts: now(), user_name: SESSION.name || "", supplier_id: supplierId, total, paid, token: token || "" };
     DB.purchases.push(pur);
     const done = [];
     for (const L of lines){
@@ -799,7 +895,7 @@ function paySupplier(sid, amount){
   amount = Math.round(num(amount) * 100) / 100;
   if (amount <= 0) throw new Error("اكتب مبلغ أكبر من صفر");
   const s = DB.suppliers.find(x => x.id === sid); if (!s) throw new Error("المورد مش موجود");
-  DB.supplier_payments.push({ id: nextId(DB.supplier_payments), ts: now(), supplier_id: sid, amount });
+  DB.supplier_payments.push({ id: nextId(DB.supplier_payments), ts: now(), user_name: SESSION.name || "", supplier_id: sid, amount });
   saveSoon();
 }
 function doSupplierReturn(sid, vid, qty, amount){
@@ -809,7 +905,7 @@ function doSupplierReturn(sid, vid, qty, amount){
   if (qty < 1 || qty > v.qty) throw new Error("كمية المرتجع أكبر من المخزون (" + v.qty + ")");
   const amt = amount == null || amount === "" ? Math.round(qty * v.cost * 100) / 100 : Math.round(num(amount) * 100) / 100;
   if (amt < 0) throw new Error("المبلغ غير صحيح");
-  DB.supplier_returns.push({ id: nextId(DB.supplier_returns), ts: now(), supplier_id: sid, variant_id: vid, qty, amount: amt });
+  DB.supplier_returns.push({ id: nextId(DB.supplier_returns), ts: now(), user_name: SESSION.name || "", supplier_id: sid, variant_id: vid, qty, amount: amt });
   v.qty -= qty; logMove(vid, -qty, "مرتجع للمورد"); saveSoon();
   return amt;
 }
@@ -831,7 +927,7 @@ function collectInstallment(planId, amt){
     const take = Math.round(Math.min(left, r.amount - r.paid) * 100) / 100;
     r.paid = Math.round((r.paid + take) * 100) / 100; left -= take;
   }
-  DB.installment_payments.push({ id: nextId(DB.installment_payments), ts: now(), plan_id: planId, amount: amt, note: "" });
+  DB.installment_payments.push({ id: nextId(DB.installment_payments), ts: now(), user_name: SESSION.name || "", plan_id: planId, amount: amt, note: "" });
   saveSoon();
 }
 
@@ -840,7 +936,7 @@ function addExpense(category, amount, note){
   category = String(category || "").trim(); amount = Math.round(num(amount) * 100) / 100;
   if (!category) throw new Error("اكتب نوع المصروف");
   if (amount <= 0) throw new Error("اكتب مبلغ أكبر من صفر");
-  DB.expenses.push({ id: nextId(DB.expenses), ts: now(), category, note: String(note || "").trim(), amount });
+  DB.expenses.push({ id: nextId(DB.expenses), ts: now(), user_name: SESSION.name || "", category, note: String(note || "").trim(), amount });
   saveSoon();
 }
 async function deleteExpense(eid){
@@ -864,6 +960,7 @@ function dayClosing(day){
     expenses: Math.round(DB.expenses.filter(e => inD(e.ts)).reduce((s,e) => s + e.amount, 0) * 100) / 100,
     supplier_out: Math.round((DB.purchases.filter(p => inD(p.ts)).reduce((s,p) => s + p.paid, 0) + DB.supplier_payments.filter(p => inD(p.ts)).reduce((s,p) => s + p.amount, 0)) * 100) / 100 };
   d.cash_net = Math.round((d.cash_sales + d.inst_in - d.ret_cash - d.expenses - d.supplier_out) * 100) / 100;
+  d.card_sales = Math.round((DB.sales.filter(s => inD(s.ts) && s.payment !== "كاش" && s.payment !== "مقسّم" && s.payment !== "قسط").reduce((q,s) => q + s.total, 0) + DB.sales.filter(s => inD(s.ts) && s.payment === "مقسّم").reduce((q,s) => q + (s.card_part || 0), 0)) * 100) / 100;
   return d;
 }
 
@@ -1099,6 +1196,22 @@ function stocktakeCsv(){
 }
 
 // ---------- لقطات النسخ الاحتياطي التلقائية (جوّه الجهاز) ----------
+// اللقطة بتتضغط (gzip) عشان الـ14 نسخة ماتاخدش 14 ضعف المساحة. القديمة (نص عادي) لسه بتتقرأ.
+function _b64(bytes){ let s = ""; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return btoa(s); }
+function _unb64(str){ const s = atob(str); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }
+async function packSnap(text){
+  try {
+    if (typeof CompressionStream === "undefined" || typeof Response === "undefined" || typeof Blob === "undefined") return text;
+    const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+    const out = "gz64:" + _b64(new Uint8Array(buf));
+    return out.length < text.length ? out : text;
+  } catch (e){ return text; }
+}
+async function unpackSnap(s){
+  if (typeof s !== "string" || s.slice(0, 5) !== "gz64:") return s;
+  const buf = await new Response(new Blob([_unb64(s.slice(5))]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+  return new TextDecoder().decode(buf);
+}
 const SNAP_INDEX_KEY = "snap_index";
 async function snapshotDaily(force){
   const today = todayStr();
@@ -1110,7 +1223,7 @@ async function snapshotDaily(force){
   idx.sort((x,y) => x.day < y.day ? -1 : 1);
   while (idx.length > 14){ const old = idx.shift(); try { await _store.set("snap_" + old.day, ""); } catch (e){} }
   try {
-    await _store.set("snap_" + today, exportData());
+    await _store.set("snap_" + today, await packSnap(exportData()));
     await _store.set(SNAP_INDEX_KEY, idx);
     return true;
   } catch (e){ return false; }
@@ -1121,7 +1234,62 @@ async function listSnapshots(){
 async function loadSnapshot(day){
   const s = await _store.get("snap_" + day);
   if (!s) throw new Error("اللقطة دي مش موجودة");
-  return s;
+  return await unpackSnap(s);
+}
+
+
+// ---------- نسخة احتياطية بتتفحص قبل ما تتحسب ناجحة ----------
+function backupSummary(obj){
+  const days = (obj.sales || []).map(s => String(s.ts || "").slice(0, 10)).filter(Boolean).sort();
+  return { sales: (obj.sales || []).length, variants: (obj.variants || []).length, customers: (obj.customers || []).length,
+    expenses: (obj.expenses || []).length, from: days[0] || "", to: days[days.length - 1] || "" };
+}
+function backupSummaryText(sm){
+  return sm.sales + " فاتورة، " + sm.variants + " صنف، " + sm.customers + " عميل" + (sm.from ? "، من " + sm.from + " لحد " + sm.to : "");
+}
+// بيعمل النسخة، يقراها تاني، ويقارن عدد السجلات وبصمة المحتوى بالبيانات الحالية. لو فيه فرق بيرمي خطأ.
+async function makeVerifiedBackup(){
+  const text = exportData();
+  const back = JSON.parse(text);
+  for (const t of TABLES) if ((back[t] || []).length !== DB[t].length) throw new Error("النسخة طلعت ناقصة (" + t + ") — ماتعتمدتش");
+  if (await sha256Hex(JSON.stringify(back)) !== await sha256Hex(text)) throw new Error("بصمة النسخة مش مظبوطة — ماتعتمدتش");
+  return { text, sum: backupSummary(back), hash: (await sha256Hex(text)).slice(0, 10) };
+}
+// معاينة ملف قبل الاسترجاع (من غير ما يتغير حاجة)
+function previewBackupText(json){
+  const d = JSON.parse(json);
+  if (!d || !Array.isArray(d.sales) || !Array.isArray(d.variants)) throw new Error("الملف ده مش نسخة احتياطية صح");
+  return { file: backupSummary(d), now: backupSummary(DB) };
+}
+
+// ---------- تقفيلات اليوم المحفوظة ----------
+function saveClosing(c){
+  const day = String(c.day || "").slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("اليوم غلط");
+  const rec = { id: nextId(DB.day_closings), ts: now(), day, user_name: SESSION.name || (SESSION.manager ? "المدير" : ""),
+    opening: rnd2(num(c.opening)), expected: rnd2(num(c.expected)), actual: c.actual == null || c.actual === "" ? null : rnd2(num(c.actual)),
+    diff: c.actual == null || c.actual === "" ? null : rnd2(num(c.actual) - num(c.expected)),
+    cash_sales: c.cash_sales, card_sales: c.card_sales, inst_in: c.inst_in, ret_cash: c.ret_cash, expenses: c.expenses, supplier_out: c.supplier_out, n_sales: c.n_sales };
+  DB.day_closings.push(rec); saveSoon(); return rec;
+}
+
+// ---------- كشف الحركات المالية الموحّد ----------
+function ledgerRows(a, b){
+  const inR = ts => { const d = dayOf(ts); return d >= a && d <= b; };
+  const R = [];
+  const cust = id => { const c = DB.customers.find(x => x.id === id); return c ? c.name : ""; };
+  for (const s of DB.sales) if (inR(s.ts)) R.push({ ts: s.ts, kind: "بيع", ref: "فاتورة " + s.id, amount: s.total, who: s.user_name || "", note: s.payment + (s.customer_id ? " — " + cust(s.customer_id) : "") });
+  for (const r of DB.returns) if (inR(r.ts)) R.push({ ts: r.ts, kind: "مرتجع", ref: "فاتورة " + r.sale_id, amount: -r.refund, who: r.user_name || "", note: "" });
+  for (const p of DB.installment_payments) if (inR(p.ts)) R.push({ ts: p.ts, kind: "تحصيل قسط", ref: "خطة " + p.plan_id, amount: p.amount, who: p.user_name || "", note: p.note || "" });
+  for (const p of DB.purchases) if (inR(p.ts)) R.push({ ts: p.ts, kind: "فاتورة شراء", ref: "شراء " + p.id, amount: -(p.paid || 0), who: p.user_name || "", note: "مدفوع من إجمالي " + (p.total != null ? p.total : "") });
+  for (const p of DB.supplier_payments) if (inR(p.ts)) R.push({ ts: p.ts, kind: "دفعة مورد", ref: "مورد " + p.supplier_id, amount: -p.amount, who: p.user_name || "", note: "" });
+  for (const r of DB.supplier_returns) if (inR(r.ts)) R.push({ ts: r.ts, kind: "مرتجع مورد", ref: "مورد " + r.supplier_id, amount: r.amount || 0, who: r.user_name || "", note: "" });
+  for (const e of DB.expenses) if (inR(e.ts)) R.push({ ts: e.ts, kind: e.category === DRAW ? "سحب شخصي" : "مصروف", ref: e.category, amount: -e.amount, who: e.user_name || "", note: e.note || "" });
+  return R.sort((x, y) => x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : 0);
+}
+function ledgerCsv(rows){
+  const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  return "\ufeff" + ["الوقت", "النوع", "المرجع", "المبلغ", "الموظف", "ملاحظة"].map(q).join(",") + "\n" +
+    rows.map(r => [r.ts, r.kind, r.ref, r.amount, r.who, r.note].map(q).join(",")).join("\n");
 }
 </script>
 <script>
@@ -2198,11 +2366,12 @@ function customerSheet(cid){
   sh.querySelector("#cu-close").onclick = closeModal;
 }
 async function collectSheet(pl){
+  if (!(await gate("collect", "تحصيل قسط"))) return;
   const left = planOutstanding(pl.id);
   const val = await uiPrompt(`هيحصل كام؟ (المتبقي على الخطة ${money(left)} ج)`, String(left));
   if (val == null){ closeModal(); return; }
   try {
-    collectInstallment(pl.id, num(val));
+    collectInstallment(pl.id, num(val)); await logAct("تحصيل قسط", "خطة " + pl.id + "، " + money(num(val)) + " ج، " + (SESSION.name || (SESSION.manager ? "المدير" : ""))); await saveNow();
     closeModal(); if (typeof drawCustList === "function" && document.getElementById("custList")) drawCustList();
     if (window.__plansRefresh && document.getElementById("pg-sub").classList.contains("on")) window.__plansRefresh();
     toast("اتحصل " + money(num(val)) + " ج");
@@ -2277,6 +2446,7 @@ async function drawReports(){
     <button class="menu-item" data-r="emp"><span class="ico">🧑‍💼</span><div>مبيعات كل بائع<span class="muted">حسب الاسم على الفاتورة</span></div></button>
     <button class="menu-item" data-r="reorder"><span class="ico">📋</span><div>قايمة النواقص للطلب<span class="muted">تصدير CSV</span></div></button>
     <button class="menu-item" data-r="price"><span class="ico">💲</span><div>سجل أسعار صنف<span class="muted">تغييرات الشراء والبيع</span></div></button>
+    <button class="menu-item" data-r="ledger"><span class="ico">📒</span><div>كشف الحركات المالية<span class="muted">كل بيع ومرتجع وتحصيل ومصروف، مع الموظف</span></div></button>
     <button class="menu-item" data-r="activity"><span class="ico">📜</span><div>سجل النشاطات<span class="muted">والتأكد إنه ماتعبثش بيه</span></div></button>
     <button class="menu-item" data-r="audit"><span class="ico">🛡</span><div>فحص سلامة الحسابات<span class="muted">كشف أي تلف أو تعديل من بره</span></div></button>
     <div id="repLow"></div>`;
@@ -2288,7 +2458,7 @@ async function drawReports(){
 }
 function reportSection(which){
   ({ closing: closingSheet, compare: compareSheet, cat: catSheet, emp: empSheet,
-     reorder: reorderSheet, price: priceSheet, activity: activitySheet, audit: auditSheet, range: rangeSheet })[which]();
+     reorder: reorderSheet, price: priceSheet, activity: activitySheet, ledger: ledgerSheet, audit: auditSheet, range: rangeSheet })[which]();
 }
 function closingSheet(){
   const sh = sheet(`<h3>تقفيل اليوم</h3>
@@ -2297,10 +2467,19 @@ function closingSheet(){
     <input id="cl-actual" type="number" inputmode="decimal" placeholder="الكاش الفعلي في الدرج"></div>
     <button id="cl-run" class="primary">احسب</button>
     <div id="cl-out"></div>
+    <button id="cl-save" class="primary">💾 احفظ التقفيلة</button>
+    <button id="cl-past">📚 التقفيلات القديمة</button>
     <div class="row2"><button id="cl-print">🖨 طباعة التقفيلة</button><button id="cl-wa">🟢 مشاركة واتساب</button></div>
     <button id="cl-cancel" class="cancel">قفل</button>`);
   sh.querySelector("#cl-cancel").onclick = closeModal;
-  let lastTxt = "";
+  let lastTxt = "", lastC = null;
+  sh.querySelector("#cl-save").onclick = async () => {
+    if (!lastC){ toast("احسب الأول", true); return; }
+    if (DB.day_closings.some(c => c.day === lastC.day) && !await uiConfirm("اليوم ده متقفل قبل كده. تحفظ تقفيلة تانية له؟")) return;
+    try { saveClosing(lastC); await logAct("تقفيل يوم", lastC.day + "، متوقع " + money(lastC.expected) + (lastC.actual != null ? "، فعلي " + money(lastC.actual) : "")); await saveNow(); toast("اتحفظت التقفيلة ✔"); }
+    catch (e){ toast(e.message, true); }
+  };
+  sh.querySelector("#cl-past").onclick = () => closingsListSheet();
   sh.querySelector("#cl-run").onclick = () => {
     const day = sh.querySelector("#cl-day").value || todayStr();
     const d = dayClosing(day);
@@ -2313,10 +2492,12 @@ function closingSheet(){
       const diff = rnd2(num(actualRaw) - expected);
       diffRow = `<div class="stat"><div>${diff < 0 ? "عجز في الدرج" : diff > 0 ? "زيادة في الدرج" : "الدرج مظبوط ✔"}</div><b>${money(Math.abs(diff))} ج</b><span>الفعلي ${money(num(actualRaw))} مقابل المتوقع ${money(expected)}</span></div>`;
     }
+    lastC = { day, opening, expected, actual: actualRaw === "" ? null : num(actualRaw), cash_sales: d.cash_sales, card_sales: d.card_sales, inst_in: d.inst_in, ret_cash: d.ret_cash, expenses: d.expenses, supplier_out: d.supplier_out, n_sales: d.n_sales };
     const payRows = Object.keys(d.by_pay).map(k => `<div class="card">${esc(k)}: ${d.by_pay[k].n} فاتورة — ${money(d.by_pay[k].t)} ج</div>`).join("");
     sh.querySelector("#cl-out").innerHTML = `
       ${payRows || '<div class="muted">مفيش مبيعات في اليوم ده.</div>'}
       <div class="card">مبيعات كاش (+ كاش المقسّم): <b>${money(d.cash_sales)}</b></div>
+      <div class="card">مبيعات فيزا/كارت (مش في الدرج): <b>${money(d.card_sales)}</b></div>
       <div class="card">تحصيلات أقساط: <b>${money(d.inst_in)}</b></div>
       <div class="card">مرتجعات خرجت كاش: <b style="color:var(--bad)">- ${money(d.ret_cash)}</b></div>
       <div class="card">مصروفات: <b style="color:var(--bad)">- ${money(d.expenses)}</b></div>
@@ -2463,14 +2644,14 @@ function priceSheet(){
 }
 function activitySheet(){
   const sh = sheet(`<h3>سجل النشاطات</h3>
-    <button id="ac-verify" class="primary">التأكد إن السجل ماتعبثش بيه</button>
+    <button id="ac-verify" class="primary">فحص السجل (بيكشف التعديل العادي)</button>
     <div id="ac-res"></div><div id="ac-list" style="margin-top:8px"></div>
     <button id="ac-cancel" class="cancel">قفل</button>`);
   sh.querySelector("#ac-cancel").onclick = closeModal;
   sh.querySelector("#ac-verify").onclick = async () => {
     const r = await verifyActivity();
     sh.querySelector("#ac-res").innerHTML = r.ok
-      ? `<div class="card good-t">✔ السجل سليم (${r.count} سجل، سلسلة الحماية مظبوطة)</div>`
+      ? `<div class="card good-t">✔ السجل متسق (${r.count} سجل). ملحوظة: الفحص ده بيكشف التعديل العادي بس، مش حماية قاطعة لو حد عنده وصول لتخزين الموبايل نفسه.</div>`
       : `<div class="card owed">⚠️ السجل اتعدّل أو اتمسح — أول نقطة كسر عند سجل رقم ${r.at} (${esc(r.why)})</div>`;
   };
   const list = sh.querySelector("#ac-list");
@@ -2486,6 +2667,40 @@ async function auditSheet(){
   issues.forEach(i => sh.appendChild(el("div", "card owed", "⚠️ " + i)));
   if (!v.ok) sh.appendChild(el("div", "card owed", "⚠️ سجل النشاطات مكسور عند سجل رقم " + v.at));
   const c = el("button", "cancel", "قفل"); c.onclick = closeModal; sh.appendChild(c);
+}
+
+function closingsListSheet(){
+  const rows = DB.day_closings.slice().sort((a, b) => a.day < b.day ? 1 : a.day > b.day ? -1 : (a.id < b.id ? 1 : -1)).slice(0, 60);
+  const sh = sheet(`<h3>التقفيلات المحفوظة</h3><div id="cp-list"></div><button id="cp-x" class="cancel">قفل</button>`);
+  sh.querySelector("#cp-x").onclick = closeModal;
+  const box = sh.querySelector("#cp-list");
+  if (!rows.length) box.innerHTML = '<div class="muted">مفيش تقفيلات محفوظة لسه.</div>';
+  rows.forEach(c => {
+    const st = c.diff == null ? "من غير جرد فعلي" : c.diff < 0 ? "عجز " + money(-c.diff) : c.diff > 0 ? "زيادة " + money(c.diff) : "مظبوط ✔";
+    box.appendChild(el("div", "card", `<div class="grow"><b>${esc(c.day)}</b> — ${st}<div class="muted">عهدة ${money(c.opening)} • متوقع ${money(c.expected)}${c.actual != null ? " • فعلي " + money(c.actual) : ""} • كاش ${money(c.cash_sales)} • كارت ${money(c.card_sales)}${c.user_name ? " • " + esc(c.user_name) : ""}</div></div>`));
+  });
+}
+function ledgerSheet(){
+  const t = todayStr();
+  const sh = sheet(`<h3>كشف الحركات المالية</h3>
+    <div class="row2"><input id="lg-a" type="date" value="${t}"><input id="lg-b" type="date" value="${t}"></div>
+    <div class="row2"><button id="lg-go" class="primary">اعرض</button><button id="lg-csv">⬇ CSV</button></div>
+    <div id="lg-list" style="margin-top:8px"></div><button id="lg-x" class="cancel">قفل</button>`);
+  sh.querySelector("#lg-x").onclick = closeModal;
+  let rows = [];
+  const go = () => {
+    rows = ledgerRows(sh.querySelector("#lg-a").value || t, sh.querySelector("#lg-b").value || t);
+    const box = sh.querySelector("#lg-list"); box.innerHTML = "";
+    if (!rows.length) box.innerHTML = '<div class="muted">مفيش حركات في الفترة دي.</div>';
+    rows.slice(0, 300).forEach(r => box.appendChild(el("div", "card", `<div class="grow">${esc(r.kind)} — ${esc(r.ref)}<div class="muted">${esc(r.ts)}${r.who ? " • " + esc(r.who) : ""}${r.note ? " • " + esc(r.note) : ""}</div></div><b style="color:${r.amount < 0 ? "var(--bad)" : "inherit"}">${money(r.amount)}</b>`)));
+    if (rows.length > 300) box.appendChild(el("div", "muted", "معروض أحدث 300 حركة، الـ CSV فيه الكل (" + rows.length + ")"));
+  };
+  sh.querySelector("#lg-go").onclick = go; go();
+  sh.querySelector("#lg-csv").onclick = () => {
+    const blob = new Blob([ledgerCsv(rows)], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "حركات-مالية.csv"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
 }
 </script>
 <script>
@@ -2551,7 +2766,7 @@ function drawHome(){
       <button data-h="rep">📊 تقارير</button>
     </div>
     <div id="homeGuide"></div>
-    ${bkDays > 7 ? `<div class="card" style="border-color:var(--bad)"><div class="grow">⚠️ مفيش نسخة احتياطية متنزّلة من فترة${bkDays < 9000 ? " (" + Math.trunc(bkDays) + " يوم)" : ""}. نزّل نسخة من: المزيد ← النسخ الاحتياطي. فيه لقطات تلقائية يومية جوّه التطبيق، بس نسخة متنزّلة أأمن.</div></div>` : ""}`;
+    ${bkDays > 7 ? `<div class="card" style="border-color:var(--bad)"><div class="grow">⚠️ مفيش نسخة احتياطية متنزّلة من فترة${bkDays < 9000 ? " (" + Math.trunc(bkDays) + " يوم)" : ""}. ابعت نسخة لنفسك (واتساب/درايف) من: المزيد ← النسخ الاحتياطي. فيه لقطات تلقائية يومية جوّه التطبيق، بس نسخة متنزّلة أأمن.</div></div>` : ""}`;
   pg.querySelectorAll("[data-h]").forEach(b => b.onclick = () => {
     const k = b.dataset.h;
     if (k === "sale") show("sale");
@@ -2636,6 +2851,8 @@ function drawMore(){
 }
 async function moreSection(which){
   if (which === "settings" && !(await gate("settings", "فتح الإعدادات"))) return;
+  if (which === "purch" && !(await gate("purchases", "المشتريات والموردين"))) return;
+  if (which === "exp" && !(await gate("expenses", "المصروفات"))) return;
   ({ purch: drawPurchases, exp: drawExpenses, stocktake: drawStocktake, returns: drawReturns,
      emps: drawEmployees, settings: drawSettings, backup: drawBackup })[which]( );
 }
@@ -2838,6 +3055,7 @@ function drawExpenses(){
         row.innerHTML = `<div class="grow">${money(e.amount)} ج — ${esc(e.category)}${e.note ? " — " + esc(e.note) : ""}<div class="muted">${e.ts}</div></div><button class="danger">×</button>`;
         row.querySelector("button").onclick = async () => {
           if (!(await gate("edit", "حذف مصروف"))) return;
+          if (dayOf(e.ts) < todayStr() && !SESSION.manager && pinSet() && !(await askPin(null, "حذف مصروف قديم محتاج موافقة المدير"))) return;
           if (!await uiConfirm("حذف المصروف ده؟")) return;
           await deleteExpense(e.id); drawList(); toast("اتمسح");
         };
@@ -3147,6 +3365,7 @@ function drawSettings(){
         <input id="st-lw" type="number" inputmode="numeric" style="max-width:70px" value="${esc(s.label_w || "40")}"> ×
         <input id="st-lh" type="number" inputmode="numeric" style="max-width:70px" value="${esc(s.label_h || "30")}"></div>
       <h3>الشكل</h3>
+      <div class="card"><div class="grow">قفل تلقائي بعد (دقايق من غير استخدام، 0 = مقفول)<div class="muted">بيشتغل بس لو فيه رقم سري للمدير</div></div><input id="st-idle" type="number" inputmode="numeric" style="width:70px" value="${esc(getSetting("idle_min"))}"></div>
       <div class="card"><div class="grow">الوضع الغامق</div><input id="st-dark" type="checkbox" style="width:auto" ${s.dark_mode === "1" ? "checked" : ""}></div>
       <button id="st-save" class="primary" style="width:100%">حفظ الإعدادات</button>
       <div class="muted" style="margin-top:8px">النسخة الاحتياطية التلقائية في مجلد تاني (backup_dir2) متاحة في نسخة الكمبيوتر بس${s.backup_dir2 ? " — مضبوطة هناك على: " + esc(s.backup_dir2) : ""}.</div>`;
@@ -3164,6 +3383,7 @@ function drawSettings(){
       setSetting("loyalty_point_value", String(Math.max(0, num(g("#st-pval").value, 1))));
       DB.settings.label_w = g("#st-lw").value || "40";
       DB.settings.label_h = g("#st-lh").value || "30";
+      setSetting("idle_min", String(Math.max(0, Math.min(240, parseInt(g("#st-idle").value, 10) || 0))));
       setSetting("dark_mode", g("#st-dark").checked ? "1" : "0");
       await saveAll(); applyDark(); toast("اتحفظت الإعدادات ✔");
     };
@@ -3175,7 +3395,9 @@ function drawBackup(){
   showSub("النسخ الاحتياطي والاستيراد", body => {
     body.innerHTML = `
       <h3>نسخة احتياطية (JSON)</h3>
-      <button id="bk-exp" class="primary" style="width:100%">⬇ تنزيل نسخة احتياطية</button>
+      <button id="bk-share" class="primary" style="width:100%">📤 ابعت نسخة احتياطية (واتساب / درايف / إيميل)</button>
+      <div class="muted" style="margin:4px 0 8px">النسخ اللي جوه التطبيق بتتمسح لو مسحت بيانات المتصفح أو الموبايل ضاع. ابعت نسخة لنفسك كل أسبوع.</div>
+      <button id="bk-exp" style="width:100%">⬇ تنزيل نسخة احتياطية</button>
       <label class="cam" style="display:block;margin-top:8px"><button type="button" style="width:100%">⬆ استرجاع نسخة JSON</button>
       <input id="bk-imp" type="file" accept="application/json,.json"></label>
       <h3 style="margin-top:14px">نسخ تلقائية محفوظة جوه التطبيق (آخر 14 يوم)</h3>
@@ -3192,13 +3414,25 @@ function drawBackup(){
       </div>
       <h3 style="margin-top:14px">خطير</h3>
       <button id="bk-wipe" class="danger" style="width:100%">مسح كل البيانات على الموبايل</button>`;
-    body.querySelector("#bk-exp").onclick = () => {
-      const blob = new Blob([exportData()], { type: "application/json" });
+    body.querySelector("#bk-share").onclick = async () => {
+      const name = "نسخة-احتياطية-" + todayStr() + ".json";
+      try {
+        const vb = await makeVerifiedBackup();
+        const file = new File([vb.text], name, { type: "application/json" });
+        if (navigator.canShare && navigator.canShare({ files: [file] })){
+          await navigator.share({ files: [file], title: "نسخة احتياطية - برنامج المحل" });
+          setSetting("last_bk_dl", todayStr()); saveSoon(); toast("اتبعتت النسخة ✔ اتفحصت: " + backupSummaryText(vb.sum));
+        } else { body.querySelector("#bk-exp").click(); toast("الموبايل ده مابيدعمش المشاركة — اتنزّلت النسخة بدل كده"); }
+      } catch (e){ if (e && e.name !== "AbortError") toast("مقدرتش أبعت النسخة: " + (e.message || e), true); }
+    };
+    body.querySelector("#bk-exp").onclick = async () => {
+      let vb; try { vb = await makeVerifiedBackup(); } catch (e){ toast(e.message, true); return; }
+      const blob = new Blob([vb.text], { type: "application/json" });
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
       a.download = "نسخة-احتياطية-" + todayStr() + ".json"; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       setSetting("last_bk_dl", todayStr());
-      toast("اتنزّلت النسخة ✔");
+      toast("اتنزّلت النسخة ✔ اتفحصت: " + backupSummaryText(vb.sum));
     };
     (async () => {
       const box = body.querySelector("#bk-snaps");
@@ -3227,8 +3461,9 @@ function drawBackup(){
     body.querySelector("#bk-imp").addEventListener("change", async e => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
       if (!(await gate("settings", "استيراد نسخة احتياطية"))) return;
-      if (!await uiConfirm("الاستيراد هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
-      try { await importData(await f.text()); lockNow(); refreshLock(); applyDark(); drawMore(); toast("النسخة اترجعت ✔"); }
+      let txt, pv; try { txt = await f.text(); pv = previewBackupText(txt); } catch (e3){ toast(e3.message, true); return; }
+      if (!await uiConfirm("الملف فيه: " + backupSummaryText(pv.file) + "\nاللي على الموبايل دلوقتي: " + backupSummaryText(pv.now) + "\nالاستيراد هيستبدل كل البيانات الحالية. متأكد؟")) return;
+      try { await importData(txt); lockNow(); refreshLock(); applyDark(); drawMore(); toast("النسخة اترجعت ✔"); }
       catch (e2){ toast(e2.message, true); }
     });
     body.querySelector("#bk-desk").addEventListener("change", async e => {
@@ -3281,6 +3516,21 @@ function bindAll(){
   };
   $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
 }
+// حفظ فوري لما الشاشة تتقفل أو التطبيق يتخبّى، وتحديث لو شاشة تانية حفظت أحدث
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushSave();
+  else refreshIfStale().then(r => { if (r){ applyDark(); refreshLock(); show(curPage); toast("اتحدّثت البيانات من الشاشة التانية"); } }).catch(() => {});
+});
+window.addEventListener("pagehide", flushSave);
+// قفل تلقائي بعد فترة من غير استخدام (بيشتغل بس لو فيه رقم سري)
+let _lastAct = Date.now();
+["pointerdown", "keydown", "touchstart"].forEach(ev => document.addEventListener(ev, () => { _lastAct = Date.now(); }, true));
+setInterval(() => {
+  const m = parseInt(getSetting("idle_min"), 10);
+  if (!m || m < 1 || !pinSet() || !(SESSION.manager || SESSION.name)) return;
+  if (Date.now() - _lastAct > m * 60000){ lockNow(); refreshLock(); toast("اتقفل لوحده بعد " + m + " دقيقة 🔒"); }
+}, 15000);
+window.addEventListener("online", () => setSaveStatus("ok")); window.addEventListener("offline", () => setSaveStatus("offline"));
 function boot(){
   try {
     bindAll();
