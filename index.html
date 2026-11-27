@@ -137,7 +137,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.3";
+const APP_VER = "2.1.4";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -1302,7 +1302,7 @@ const $ = s => document.querySelector(s);
 function errBar(msg){
   let b = document.getElementById("errbar");
   if (!b){ b = document.createElement("div"); b.id = "errbar"; document.body.appendChild(b); }
-  b.textContent = "⚠️ " + msg; b.style.display = "block";
+  b.textContent = "⚠️ " + msg; b.style.display = "block"; b.onclick = () => { b.style.display = "none"; };
 }
 window.addEventListener("error", e => errBar("خطأ في التشغيل: " + (e.message || "غير معروف") + (e.lineno ? " (سطر " + e.lineno + ")" : "")));
 window.addEventListener("unhandledrejection", e => { const r = e.reason; errBar("خطأ: " + (r && (r.message || r.name) || r)); });
@@ -1315,6 +1315,7 @@ function sheet(html){
   m.classList.add("on"); return m.firstChild;
 }
 function fmtDay(ts){ const d = dayOf(ts); return d; }
+function fmtDT(ts){ return String(ts || "").replace("T", " ").slice(0, 16); }
 
 // ---------- الرقم السري ----------
 function refreshLock(){
@@ -2129,7 +2130,9 @@ function collectSheet(pl){
   if (val == null){ closeModal(); return; }
   try {
     collectInstallment(pl.id, num(val));
-    closeModal(); drawCustList(); toast("اتحصل " + money(num(val)) + " ج");
+    closeModal(); if (typeof drawCustList === "function" && document.getElementById("custList")) drawCustList();
+    if (window.__plansRefresh && document.getElementById("pg-sub").classList.contains("on")) window.__plansRefresh();
+    toast("اتحصل " + money(num(val)) + " ج");
   } catch (e){ toast(e.message, true); }
 }
 function showStatement(cid){
@@ -2475,14 +2478,14 @@ function drawHome(){
       <button data-h="rep">📊 تقارير</button>
     </div>
     <div id="homeGuide"></div>
-    ${bkDays > 7 ? '<div class="card" style="border-color:var(--bad)"><div class="grow">⚠️ مفيش نسخة احتياطية متنزّلة من فترة${bkDays < 9000 ? " (" + Math.trunc(bkDays) + " يوم)" : ""}. نزّل نسخة من: المزيد ← النسخ الاحتياطي. فيه لقطات تلقائية يومية جوّه التطبيق، بس نسخة متنزّلة أأمن.</div></div>"' : ""}`;
+    ${bkDays > 7 ? `<div class="card" style="border-color:var(--bad)"><div class="grow">⚠️ مفيش نسخة احتياطية متنزّلة من فترة${bkDays < 9000 ? " (" + Math.trunc(bkDays) + " يوم)" : ""}. نزّل نسخة من: المزيد ← النسخ الاحتياطي. فيه لقطات تلقائية يومية جوّه التطبيق، بس نسخة متنزّلة أأمن.</div></div>` : ""}`;
   pg.querySelectorAll("[data-h]").forEach(b => b.onclick = () => {
     const k = b.dataset.h;
     if (k === "sale") show("sale");
     else if (k === "rep") show("reports");
     else if (k === "close") closingSheet();
     else if (k === "plans") drawPlans();
-    else moreSection(k);
+    else moreSection(k === "ret" ? "returns" : k);
   });
   const g = $("#homeGuide");
   if (!DB.variants.length){
@@ -2532,6 +2535,7 @@ function drawPlans(){
         list.appendChild(row);
       });
     };
+    window.__plansRefresh = drawList;
     body.querySelector("#pl-q").addEventListener("input", drawList);
     body.querySelector("#pl-late").onclick = e => { onlyLate = !onlyLate; e.target.textContent = "اللي عليهم متبقي بس: " + (onlyLate ? "أيوه" : "لأ"); drawList(); };
     drawList();
