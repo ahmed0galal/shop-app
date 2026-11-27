@@ -1,4 +1,4 @@
-const CACHE = "shop-v13";
+const CACHE = "shop-v14";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-512-mask.png", "./sql-wasm.js", "./sql-wasm.wasm"];
 // كل ملف بيتحمّل من السيرفر مباشرة (cache: reload) عشان نسخة قديمة من كاش المتصفح ماتتخزنش كنسخة جديدة
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => Promise.all(ASSETS.map(u => fetch(new Request(u, { cache: "reload" })).then(r => { if (!r.ok) throw new Error(u); return c.put(u, r); })))).then(() => self.skipWaiting())); });

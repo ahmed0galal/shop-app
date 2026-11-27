@@ -171,7 +171,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.2.3";
+const APP_VER = "2.2.4";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -1508,7 +1508,17 @@ function errBar(msg){
 window.addEventListener("error", e => errBar("خطأ في التشغيل: " + (e.message || "غير معروف") + (e.lineno ? " (سطر " + e.lineno + ")" : "")));
 window.addEventListener("unhandledrejection", e => { const r = e.reason; errBar("خطأ: " + (r && (r.message || r.name) || r)); });
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
-function toast(msg, bad){ const t = $("#toast"); t.textContent = msg; t.className = "show" + (bad ? " bad" : ""); setTimeout(() => t.className = "", 3000); }
+// أي رسالة خطأ إنجليزي خام (من المتصفح أو مكتبة) بتتحوّل لعربي بسيط؛ الأصل بيتسجّل في الكونسول بس
+function arMsg(msg, bad){
+  msg = String(msg == null ? "" : msg);
+  if (!bad) return msg;
+  const AR = /[\u0600-\u06FF]/, LAT = /[A-Za-z]{3,}/;
+  if (!AR.test(msg)){ if (LAT.test(msg)){ try { console.warn("raw error:", msg); } catch (e){} return "حصلت مشكلة غير متوقعة. جرب تاني، ولو اتكررت صوّر الشاشة وابعتها."; } return msg; }
+  const k = msg.lastIndexOf(": ");
+  if (k > 0){ const tail = msg.slice(k + 2); if (!AR.test(tail) && LAT.test(tail)){ try { console.warn("raw error:", tail); } catch (e){} return msg.slice(0, k).trim(); } }
+  return msg;
+}
+function toast(msg, bad){ msg = arMsg(msg, bad); const t = $("#toast"); t.textContent = msg; t.className = "show" + (bad ? " bad" : ""); setTimeout(() => t.className = "", 3000); }
 function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function closeModal(){ try { stopScanner(); } catch (e){} $("#modal").classList.remove("on"); $("#modal").innerHTML = ""; }
 function sheet(html){
@@ -3527,25 +3537,47 @@ function drawBackup(){
       </div>
       <h3 style="margin-top:14px">خطير</h3>
       <button id="bk-wipe" class="danger" style="width:100%">مسح كل البيانات على الموبايل</button>`;
+    const bkName = () => "نسخة-احتياطية-" + todayStr() + ".json";
+    const fingerprint = () => TABLES.map(t => DB[t].length + ":" + (DB[t].length ? DB[t][DB[t].length - 1].id : 0)).join("|") + "|" + JSON.stringify(DB.settings).length;
+    let prep = null;   // نسخة جاهزة ومتفحوصة من قبل ما يدوس، عشان المشاركة تتنادى فورًا من اللمسة
+    const prepare = async () => {
+      const fp = fingerprint();
+      if (prep && prep.fp === fp) return prep;
+      const vb = await makeVerifiedBackup();
+      prep = { fp, vb, fJson: new File([vb.text], bkName(), { type: "application/json" }), fTxt: new File([vb.text], bkName(), { type: "text/plain" }) };
+      return prep;
+    };
+    prepare().catch(() => {});
+    const doDownload = pr => {
+      const blob = new Blob([pr.vb.text], { type: "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = bkName(); a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      setSetting("last_bk_dl", todayStr()); saveSoon();
+    };
     body.querySelector("#bk-share").onclick = async () => {
-      const name = "نسخة-احتياطية-" + todayStr() + ".json";
       try {
-        const vb = await makeVerifiedBackup();
-        const file = new File([vb.text], name, { type: "application/json" });
-        if (navigator.canShare && navigator.canShare({ files: [file] })){
-          await navigator.share({ files: [file], title: "نسخة احتياطية - برنامج المحل" });
-          setSetting("last_bk_dl", todayStr()); saveSoon(); toast("اتبعتت النسخة ✔ اتفحصت: " + backupSummaryText(vb.sum));
-        } else { body.querySelector("#bk-exp").click(); toast("الموبايل ده مابيدعمش المشاركة — اتنزّلت النسخة بدل كده"); }
-      } catch (e){ if (e && e.name !== "AbortError") toast("مقدرتش أبعت النسخة: " + (e.message || e), true); }
+        // لو النسخة الجاهزة لسه صالحة، المشاركة بتتنادى قبل أي await (من نفس اللمسة)
+        let pr = prep && prep.fp === fingerprint() ? prep : null;
+        if (!pr) pr = await prepare();
+        const data = f => ({ files: [f], title: "نسخة احتياطية - برنامج المحل" });
+        let shared = false;
+        for (const f of [pr.fJson, pr.fTxt]){
+          if (!navigator.share || !navigator.canShare || !navigator.canShare(data(f))) continue;
+          try { await navigator.share(data(f)); shared = true; break; }
+          catch (e){
+            if (e && e.name === "AbortError") return;   // هو اللي قفل نافذة المشاركة: مفيش رسالة
+            // NotAllowed/TypeError/غيرها: نجرب الصيغة التانية وبعدها التنزيل
+          }
+        }
+        if (shared){ setSetting("last_bk_dl", todayStr()); saveSoon(); toast("اتبعتت النسخة ✔ اتفحصت: " + backupSummaryText(pr.vb.sum)); return; }
+        doDownload(pr);
+        toast("المشاركة مش شغالة على الموبايل ده فنزّلت النسخة في التنزيلات. ابعتها بنفسك من هناك ✔ (" + backupSummaryText(pr.vb.sum) + ")");
+      } catch (e){ toast("مقدرتش أجهّز النسخة الاحتياطية. جرب تاني.", true); }
     };
     body.querySelector("#bk-exp").onclick = async () => {
-      let vb; try { vb = await makeVerifiedBackup(); } catch (e){ toast(e.message, true); return; }
-      const blob = new Blob([vb.text], { type: "application/json" });
-      const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-      a.download = "نسخة-احتياطية-" + todayStr() + ".json"; a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      setSetting("last_bk_dl", todayStr());
-      toast("اتنزّلت النسخة ✔ اتفحصت: " + backupSummaryText(vb.sum));
+      let pr; try { pr = await prepare(); } catch (e){ toast("مقدرتش أجهّز النسخة الاحتياطية. جرب تاني.", true); return; }
+      doDownload(pr);
+      toast("اتنزّلت النسخة ✔ اتفحصت: " + backupSummaryText(pr.vb.sum));
     };
     (async () => {
       const box = body.querySelector("#bk-snaps");
