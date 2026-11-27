@@ -137,7 +137,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.0";
+const APP_VER = "2.1.1";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -1023,6 +1023,7 @@ function exportData(){
 async function importData(json){
   const d = JSON.parse(json);
   if (!d || !Array.isArray(d.sales) || !Array.isArray(d.variants)) throw new Error("الملف ده مش نسخة احتياطية صح");
+  try { await snapshotDaily(true); } catch (e){}   // نقطة رجوع تلقائية قبل الاستبدال
   DB.settings = Object.assign({}, DEFAULTS, d.settings || {});
   for (const t of TABLES) DB[t] = Array.isArray(d[t]) ? d[t] : [];
   await saveAll();
@@ -1160,6 +1161,7 @@ async function importDesktopDb(bytes){
   } finally { db.close(); }
 }
 async function applyDesktopImport(data){
+  try { await snapshotDaily(true); } catch (e){}   // نقطة رجوع تلقائية قبل الاستبدال
   DB.settings = Object.assign({}, DEFAULTS, data.settings || {});
   for (const t of TABLES) DB[t] = data.tables[t] || [];
   lockNow();   // الرقم السري الجديد (من نسخة الكمبيوتر) محتاج دخول من الأول
@@ -1396,6 +1398,7 @@ function drawSale(){
     <label class="cam"><button type="button">📷</button><input id="camInput" type="file" accept="image/*" capture="environment"></label>
     <button id="scanModeBtn" class="cancel" type="button">⌨</button>
   </div>
+  <div id="favRow" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
   <div id="cartList"></div>
   <div class="total-bar">
     <div class="pay-row">
@@ -1459,6 +1462,27 @@ function drawSale(){
   $("#holdBtn").onclick = holdCurrentCart;
   $("#heldBtn").onclick = showHeldCarts;
   drawCartTotals();
+  drawFavs();
+}
+function drawFavs(){
+  const row = $("#favRow"); if (!row) return;
+  row.innerHTML = "";
+  const cut = addDays(todayStr(), -30);
+  const qty = {};
+  for (const s of DB.sales){
+    if (dayOf(s.ts) < cut) continue;
+    for (const i of DB.sale_items.filter(x => x.sale_id === s.id)) qty[i.variant_id] = (qty[i.variant_id] || 0) + i.qty;
+  }
+  const top = Object.keys(qty).sort((a,b) => qty[b] - qty[a]).slice(0, 8);
+  for (const vid of top){
+    const v = getVariant(vid); if (!v) continue;
+    const b = el("button", "pick", variantLabel(v) + (v.qty <= 0 ? " (خلص)" : ""));
+    b.style.fontSize = "13px"; b.style.padding = "6px 10px";
+    if (v.qty <= 0) b.style.opacity = "0.55";
+    b.onclick = () => { addToCart(v, 1); };
+    row.appendChild(b);
+  }
+  row.style.display = top.length ? "flex" : "none";
 }
 function cartSub(){ return cart.reduce((s,c) => s + c.qty * c.price, 0); }
 function drawCartTotals(){
@@ -1649,6 +1673,8 @@ async function finish(){
     }
     if (method === "قسط"){
       if (!curCustomer){ toast("اختار العميل الأول للقسط", true); pickCustomer(); return; }
+      const owed = DB.installment_plans.filter(p => p.customer_id === curCustomer.id).reduce((q,p) => q + planOutstanding(p.id), 0);
+      if (owed > 0 && !confirm("تنبيه: العميل ده عليه متبقي " + money(owed) + " ج من أقساط قديمة — متأكد عايز تبيع له بالقسط كمان؟")) return;
       d.plan = { name: curCustomer.name, phone: curCustomer.phone, down: num($("#downPay").value) };
     } else if ($("#received").value.trim() !== "") d.received = $("#received").value;
     $("#finishBtn").disabled = true;
@@ -1997,7 +2023,7 @@ function labelsPrintSheet(hits){
   const parts = [];
   for (const v of hits.slice(0, 60)){
     for (let i = 0; i < n; i++){
-      const c = labelCanvas(v);
+      let c = null; try { c = labelCanvas(variantAsLabel(v)); } catch (e){ toast(e.message, true); }
       if (c) parts.push('<img src="' + c.toDataURL("image/png") + '" style="width:60mm;margin:1mm">');
     }
   }
@@ -2191,7 +2217,7 @@ function closingSheet(){
     <input id="cl-actual" type="number" inputmode="decimal" placeholder="الكاش الفعلي في الدرج"></div>
     <button id="cl-run" class="primary">احسب</button>
     <div id="cl-out"></div>
-    <div class="row2"><button id="cl-print">🖨 طباعة التقفيلة</button></div>
+    <div class="row2"><button id="cl-print">🖨 طباعة التقفيلة</button><button id="cl-wa">🟢 مشاركة واتساب</button></div>
     <button id="cl-cancel" class="cancel">قفل</button>`);
   sh.querySelector("#cl-cancel").onclick = closeModal;
   let lastTxt = "";
@@ -2227,6 +2253,10 @@ function closingSheet(){
       "\nكاش الدرج المتوقع: " + money(expected) + " ج" +
       (actualRaw !== "" ? "\nالكاش الفعلي: " + money(num(actualRaw)) + " — الفرق: " + money(rnd2(num(actualRaw) - expected)) : "") +
       "\nصافي ربح اليوم بعد المصروفات: " + money(r.netProfit) + " ج";
+  };
+  sh.querySelector("#cl-wa").onclick = () => {
+    if (!lastTxt){ toast("احسب الأول", true); return; }
+    window.open("https://wa.me/?text=" + encodeURIComponent(lastTxt), "_blank");
   };
   sh.querySelector("#cl-print").onclick = () => {
     if (!lastTxt){ toast("احسب الأول", true); return; }
@@ -2290,7 +2320,12 @@ function compareSheet(){
     ${row("المبيعات", m.cur.net, m.prev.net)}${row("عدد الفواتير", m.cur.count, m.prev.count)}
     ${row("الربح", m.cur.profit, m.prev.profit)}${row("المصروفات", m.cur.exp, m.prev.exp)}
     ${row("صافي الربح", m.cur.netProfit, m.prev.netProfit)}${row("تحصيلات الأقساط", m.cur.coll, m.prev.coll)}
-    </table><button id="x" class="cancel" onclick="document.getElementById('modal').classList.remove('on')">قفل</button>`);
+    </table><button id="cmp-print">🖨 طباعة</button> <button id="x" class="cancel" onclick="document.getElementById('modal').classList.remove('on')">قفل</button>`);
+  const tb = $("#modal").querySelector("table");
+  $("#cmp-print").onclick = () => {
+    $("#pg-receipt").innerHTML = `<div id="receipt"><h3>مقارنة الشهور</h3>${tb.outerHTML}<p style='color:#777'>طُبع في ${now()}</p></div>`;
+    window.print();
+  };
 }
 function catSheet(){
   const today = todayStr(), mFirst = today.slice(0, 8) + "01";
@@ -3126,6 +3161,7 @@ function drawBackup(){
       if (pinSet() && !(await askPin(null, "مسح كل البيانات"))) return;
       if (!confirm("ده هيمسح كل البيانات على الموبايل نهائيًا. متأكد؟")) return;
       if (!confirm("آخر تأكيد: كل الفواتير والأصناف والعملاء هيتمسحوا!")) return;
+      try { await snapshotDaily(true); } catch (e){}   // نقطة رجوع تلقائية قبل المسح
       for (const t of TABLES) DB[t] = [];
       DB.settings = Object.assign({}, DEFAULTS);
       lockNow(); await saveAll(); refreshLock(); applyDark(); drawMore(); toast("اتمسحت البيانات");
@@ -3158,6 +3194,15 @@ function boot(){
   loadAll().then(() => {
     if (idb.memOnly) errBar("المتصفح ده مش بيسمح بالحفظ — البيانات هتضيع لو قفلت الصفحة. افتح التطبيق من أيقونته المثبتة.");
     snapshotDaily();
+    if (getSetting("last_seen_ver") !== APP_VER){   // نقطة رجوع تلقائية مع كل تحديث للتطبيق
+      snapshotDaily(true);
+      setSetting("last_seen_ver", APP_VER);
+      saveSoon();
+    }
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(e2 => {
+      if (e2 && e2.quota && e2.usage / e2.quota > 0.85) errBar("مساحة التخزين على الموبايل قربت تخلص — نزّل نسخة احتياطية من المزيد ← النسخ الاحتياطي");
+    }).catch(() => {});
     applyDark(); refreshLock(); show(curPage);
   }).catch(e => {
     errBar("مشكلة في تحميل البيانات: " + (e.message || e));
