@@ -137,7 +137,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.1";
+const APP_VER = "2.1.2";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -201,9 +201,11 @@ function nextId(arr){ let m = 0; for (const r of arr) if (r.id > m) m = r.id; re
 
 async function loadAll(){
   const d = await _store.get("shopdb2");
-  if (d && d.settings){
-    DB.settings = Object.assign({}, DEFAULTS, d.settings);
-    for (const t of TABLES) DB[t] = d[t] || [];
+  if (d && typeof d === "object"){
+    // حتى لو السجل ناقص (settings مثلًا) مانمسحوش حاجة: بنحفظ نسخة خام ونكمّل بالموجود
+    if (!d.settings){ try { await _store.set("shopdb2_raw_" + Date.now(), d); } catch (e){} }
+    DB.settings = Object.assign({}, DEFAULTS, d.settings || {});
+    for (const t of TABLES) DB[t] = Array.isArray(d[t]) ? d[t] : [];
     return;
   }
   // ترحيل بيانات إصدار الموبايل القديم (1.x) لو موجودة
@@ -2553,7 +2555,8 @@ function drawMore(){
   pg.querySelectorAll("[data-m]").forEach(b => b.onclick = () => moreSection(b.dataset.m));
   $("#verLbl").textContent = "إصدار الموبايل " + APP_VER + " — بنفس منطق نسخة الكمبيوتر v19";
 }
-function moreSection(which){
+async function moreSection(which){
+  if (which === "settings" && !(await gate("settings", "فتح الإعدادات"))) return;
   ({ purch: drawPurchases, exp: drawExpenses, stocktake: drawStocktake, returns: drawReturns,
      emps: drawEmployees, settings: drawSettings, backup: drawBackup })[which]( );
 }
@@ -3129,12 +3132,14 @@ function drawBackup(){
     })();
     body.querySelector("#bk-imp").addEventListener("change", async e => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+      if (!(await gate("settings", "استيراد نسخة احتياطية"))) return;
       if (!confirm("الاستيراد هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
       try { await importData(await f.text()); lockNow(); refreshLock(); applyDark(); drawMore(); toast("النسخة اترجعت ✔"); }
       catch (e2){ toast(e2.message, true); }
     });
     body.querySelector("#bk-desk").addEventListener("change", async e => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+      if (!(await gate("settings", "استيراد نسخة الكمبيوتر"))) return;
       if (!confirm("استيراد نسخة الكمبيوتر هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
       try {
         toast("بنقرأ نسخة الكمبيوتر...");
