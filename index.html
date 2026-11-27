@@ -133,7 +133,30 @@ table.grid input{ padding:6px; font-size:14px; text-align:center; }
 <div id="modal"></div>
 <div id="toast"></div>
 <script>
-if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(function(){});
+if ("serviceWorker" in navigator && location.protocol === "https:"){
+  var hadCtl = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js").then(function(reg){
+    var chk = function(){ try { reg.update(); } catch (e){} };
+    chk(); setInterval(chk, 30 * 60 * 1000);
+    document.addEventListener("visibilitychange", function(){ if (document.visibilityState === "visible") chk(); });
+  }).catch(function(){});
+  var reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", function(){
+    if (!hadCtl){ hadCtl = true; return; }   // أول تثبيت: مفيش نسخة قديمة تتحدّث
+    if (reloading) return;
+    var bar = document.getElementById("updbar");
+    if (!bar){
+      bar = document.createElement("div"); bar.id = "updbar";
+      bar.style.cssText = "position:fixed;left:8px;right:8px;top:8px;z-index:99999;background:#1d4ed8;color:#fff;padding:12px;border-radius:12px;text-align:center;font-size:16px";
+      bar.innerHTML = '\u0641\u064a\u0647 \u0646\u0633\u062e\u0629 \u062c\u062f\u064a\u062f\u0629 \u0645\u0646 \u0627\u0644\u062a\u0637\u0628\u064a\u0642. <button id="updbtn" style="margin-right:8px;padding:6px 12px;border-radius:8px;border:0;font-size:16px">\u062d\u062f\u0651\u062b \u062f\u0644\u0648\u0642\u062a\u064a</button>';
+      document.body.appendChild(bar);
+      var go = function(){ if (reloading) return; reloading = true; try { if (typeof flushSave === "function") flushSave(); } catch (e){} setTimeout(function(){ location.reload(); }, 300); };
+      document.getElementById("updbtn").onclick = go;
+      // تحديث تلقائي لو مفيش بيع شغال ومفيش نافذة مفتوحة
+      setTimeout(function(){ try { var m = document.getElementById("modal"); if (typeof cart !== "undefined" && cart.length === 0 && !(m && m.classList.contains("on"))) go(); } catch (e){} }, 4000);
+    }
+  });
+}
 </script>
 <script>
 window.__booted = false;
@@ -148,7 +171,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.2.2";
+const APP_VER = "2.2.3";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
