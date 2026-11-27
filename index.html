@@ -148,7 +148,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.2.0";
+const APP_VER = "2.2.1";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -2606,15 +2606,15 @@ function empSheet(){
   const rows = empSales(mFirst, today);
   const sh = sheet(`<h3>مبيعات كل بائع — شهر ${mFirst.slice(0,7)}</h3>`);
   if (!rows.length) sh.appendChild(el("div", "muted", "مفيش مبيعات."));
-  rows.forEach(r => sh.appendChild(el("div", "card", `${esc(r.user)}: ${r.n} فاتورة — ${money(r.t)} ج`)));
+  rows.forEach(r => sh.appendChild(el("div", "card", `${r.user}: ${r.n} فاتورة — ${money(r.t)} ج`)));
   const c = el("button", "cancel", "قفل"); c.onclick = closeModal; sh.appendChild(c);
 }
 function reorderSheet(){
   const rows = reorderList();
   const sh = sheet(`<h3>قايمة النواقص للطلب (${rows.length})</h3>`);
   if (!rows.length) sh.appendChild(el("div", "muted", "مفيش أصناف وصلت حد النواقص."));
-  rows.slice(0, 100).forEach(r => sh.appendChild(el("div", "card",
-    `${esc(r.name)} ${esc(r.size)} ${esc(r.color)} — مخزون ${r.qty} — بيع 30 يوم ${r.sold30} — اطلب: <b>${r.suggest}</b>`)));
+  rows.slice(0, 100).forEach(r => { const row = el("div", "card");
+    row.innerHTML = `${esc(r.name)} ${esc(r.size)} ${esc(r.color)} — مخزون ${r.qty} — بيع 30 يوم ${r.sold30} — اطلب: <b>${r.suggest}</b>`; sh.appendChild(row); });
   if (rows.length){
     const dl = el("button", "primary", "⬇ تنزيل CSV للمورد");
     dl.onclick = () => {
@@ -2657,7 +2657,7 @@ function activitySheet(){
   const list = sh.querySelector("#ac-list");
   const rows = DB.activity_log.slice(-100).reverse();
   if (!rows.length) list.appendChild(el("div", "muted", "لسه مفيش نشاطات مسجلة."));
-  rows.forEach(r => list.appendChild(el("div", "card", `${r.ts} — ${esc(r.action)}${r.details ? " — " + esc(r.details) : ""}`)));
+  rows.forEach(r => list.appendChild(el("div", "card", `${r.ts} — ${r.action}${r.details ? " — " + r.details : ""}`)));
 }
 async function auditSheet(){
   const issues = auditDb();
@@ -2677,7 +2677,7 @@ function closingsListSheet(){
   if (!rows.length) box.innerHTML = '<div class="muted">مفيش تقفيلات محفوظة لسه.</div>';
   rows.forEach(c => {
     const st = c.diff == null ? "من غير جرد فعلي" : c.diff < 0 ? "عجز " + money(-c.diff) : c.diff > 0 ? "زيادة " + money(c.diff) : "مظبوط ✔";
-    box.appendChild(el("div", "card", `<div class="grow"><b>${esc(c.day)}</b> — ${st}<div class="muted">عهدة ${money(c.opening)} • متوقع ${money(c.expected)}${c.actual != null ? " • فعلي " + money(c.actual) : ""} • كاش ${money(c.cash_sales)} • كارت ${money(c.card_sales)}${c.user_name ? " • " + esc(c.user_name) : ""}</div></div>`));
+    { const row = el("div", "card"); row.innerHTML = `<div class="grow"><b>${esc(c.day)}</b> — ${st}<div class="muted">عهدة ${money(c.opening)} • متوقع ${money(c.expected)}${c.actual != null ? " • فعلي " + money(c.actual) : ""} • كاش ${money(c.cash_sales)} • كارت ${money(c.card_sales)}${c.user_name ? " • " + esc(c.user_name) : ""}</div></div>`; box.appendChild(row); }
   });
 }
 function ledgerSheet(){
@@ -2692,7 +2692,7 @@ function ledgerSheet(){
     rows = ledgerRows(sh.querySelector("#lg-a").value || t, sh.querySelector("#lg-b").value || t);
     const box = sh.querySelector("#lg-list"); box.innerHTML = "";
     if (!rows.length) box.innerHTML = '<div class="muted">مفيش حركات في الفترة دي.</div>';
-    rows.slice(0, 300).forEach(r => box.appendChild(el("div", "card", `<div class="grow">${esc(r.kind)} — ${esc(r.ref)}<div class="muted">${esc(r.ts)}${r.who ? " • " + esc(r.who) : ""}${r.note ? " • " + esc(r.note) : ""}</div></div><b style="color:${r.amount < 0 ? "var(--bad)" : "inherit"}">${money(r.amount)}</b>`)));
+    rows.slice(0, 300).forEach(r => { const row = el("div", "card"); row.innerHTML = `<div class="grow">${esc(r.kind)} — ${esc(r.ref)}<div class="muted">${esc(r.ts)}${r.who ? " • " + esc(r.who) : ""}${r.note ? " • " + esc(r.note) : ""}</div></div><b dir="ltr" style="color:${r.amount < 0 ? "var(--bad)" : "inherit"}">${money(r.amount)}</b>`; box.appendChild(row); });
     if (rows.length > 300) box.appendChild(el("div", "muted", "معروض أحدث 300 حركة، الـ CSV فيه الكل (" + rows.length + ")"));
   };
   sh.querySelector("#lg-go").onclick = go; go();
@@ -2893,7 +2893,7 @@ function drawPurchases(){
     body.appendChild(el("h3", null, "آخر فواتير الشراء"));
     DB.purchases.slice(-15).reverse().forEach(p => {
       const s = DB.suppliers.find(x => x.id === p.supplier_id);
-      body.appendChild(el("div", "card", `فاتورة شراء ${p.id} — ${s ? esc(s.name) : "?"} — ${money(p.total)} ج (مدفوع ${money(p.paid)}) — ${p.ts}`));
+      body.appendChild(el("div", "card", `فاتورة شراء ${p.id} — ${s ? s.name : "?"} — ${money(p.total)} ج (مدفوع ${money(p.paid)}) — ${p.ts}`));
     });
   });
 }
@@ -3120,7 +3120,7 @@ function drawReturns(){
     if (!recent.length) rb.appendChild(el("div", "muted", "مفيش مرتجعات لسه."));
     recent.forEach(r => {
       const v = getVariant(r.variant_id);
-      rb.appendChild(el("div", "card", `فاتورة ${r.sale_id} — ${esc(v ? variantLabel(v) : "?")} × ${r.qty} — ${money(r.refund)} ج ${r.cash_out ? "(اتدفعت كاش)" : ""} — ${r.ts}`));
+      rb.appendChild(el("div", "card", `فاتورة ${r.sale_id} — ${v ? variantLabel(v) : "?"} × ${r.qty} — ${money(r.refund)} ج ${r.cash_out ? "(اتدفعت كاش)" : ""} — ${r.ts}`));
     });
     const drawList = () => {
       const list = body.querySelector("#rt-list"); list.innerHTML = "";
