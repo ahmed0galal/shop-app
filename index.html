@@ -54,10 +54,20 @@ nav .ico{ font-size:20px; display:block; }
 #modal.on{ display:flex; align-items:flex-end; justify-content:center; }
 .sheet{ background:var(--bg); border-radius:16px 16px 0 0; padding:16px; width:100%; max-width:640px; max-height:88vh; overflow:auto; }
 .sheet h3{ margin-top:0; }
+#dlg{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50; }
+#dlg.on{ display:flex; align-items:center; justify-content:center; padding:16px; }
+.dbox{ background:var(--bg); border-radius:16px; padding:16px; width:100%; max-width:420px; max-height:88vh; overflow:auto; }
+.dbox h3{ margin-top:0; }
+.dbox button{ display:block; width:100%; margin-top:8px; }
+.dbox input{ margin-bottom:8px; }
+.dbox .chips button.chip{ display:inline-block; width:auto; margin:0; padding:6px 12px; border-radius:16px; }
+label.dl{ display:block; font-size:14px; color:var(--muted); margin:4px 0; }
+.chips{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.sheet .chips button.chip{ display:inline-block; width:auto; margin:0; padding:6px 12px; border-radius:16px; }
 .sheet input,.sheet select{ margin-bottom:8px; }
 .sheet button{ display:block; width:100%; margin-top:8px; }
 .sheet button.pick{ text-align:right; }
-#toast{ position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#111827; color:#fff; padding:10px 18px; border-radius:10px; opacity:0; transition:opacity .2s; z-index:20; pointer-events:none; max-width:92vw; text-align:center; }
+#toast{ position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#111827; color:#fff; padding:10px 18px; border-radius:10px; opacity:0; transition:opacity .2s; z-index:60; pointer-events:none; max-width:92vw; text-align:center; }
 #toast.show{ opacity:1; } #toast.bad{ background:#b91c1c; }
 #errbar{ display:none; position:sticky; top:0; z-index:30; background:#b91c1c; color:#fff; padding:12px 14px; font-size:14px; line-height:1.6; }
 .stat{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:8px; }
@@ -137,7 +147,7 @@ setTimeout(function(){
 <script>
 // ====== النواة: نفس منطق نسخة الكمبيوتر v19 بالظبط (جداول + حسابات) ======
 "use strict";
-const APP_VER = "2.1.4";
+const APP_VER = "2.1.5";
 const SCHEMA_V = 7;                 // نفس رقم ترحيلات الكمبيوتر (m1..m7 متطبّقة من الأول)
 const DRAW = "سحب شخصي";            // نوع مصروف بيتحسم من صافي الربح وبيتحسم من كاش الدرج
 const DEFAULTS = { shop_name:"", shop_phone:"", footer:"شكراً لزيارتكم", low_stock:"2",
@@ -1314,6 +1324,66 @@ function sheet(html){
   const m = $("#modal"); m.innerHTML = '<div class="sheet">' + html + "</div>";
   m.classList.add("on"); return m.firstChild;
 }
+
+// ---------- حوارات داخل التطبيق (بدل prompt/confirm بتاعة المتصفح) ----------
+function dlgOpen(html){
+  let d = document.getElementById("dlg");
+  if (!d){ d = document.createElement("div"); d.id = "dlg"; document.body.appendChild(d); }
+  d.innerHTML = '<div class="dbox">' + html + "</div>"; d.classList.add("on"); return d.firstChild;
+}
+function dlgClose(){ const d = document.getElementById("dlg"); if (d){ d.classList.remove("on"); d.innerHTML = ""; } }
+// اقتراحات وانت بتكتب: بتظهر أسماء مطابقة تحت الخانة، واللمس بيملّيها
+function attachSuggest(input, getItems, onPick){
+  const box = document.createElement("div"); box.className = "chips";
+  input.insertAdjacentElement("afterend", box);
+  const draw = () => {
+    const q = normText(input.value);
+    const items = getItems(input.value).filter(x => x.pre || !q || normText(x.label).includes(q)).slice(0, 8);
+    box.innerHTML = "";
+    if (items.length === 1 && q && !items[0].pre && normText(items[0].label) === q) return;
+    if (!q && items.some(x => x.pre)) return;
+    items.forEach(x => { const b = el("button", "chip", x.label); b.type = "button"; b.onclick = () => { input.value = x.value == null ? x.label : x.value; box.innerHTML = ""; if (onPick) onPick(x); }; box.appendChild(b); });
+  };
+  input.addEventListener("input", draw); input.addEventListener("focus", draw);
+  return draw;
+}
+// fields: [{label, value, placeholder, required, inputmode, type}] -> Promise(object بمفاتيح f.key أو null لو الغى)
+function uiForm(title, fields, okLabel){
+  return new Promise(resolve => {
+    const box = dlgOpen("<h3>" + esc(title) + "</h3>" + fields.map((f, i) =>
+      (f.label ? '<label class="dl">' + esc(f.label) + "</label>" : "") +
+      '<input class="dlin" data-i="' + i + '" value="' + esc(f.value == null ? "" : f.value) + '" placeholder="' + esc(f.placeholder || "") + '"' +
+      (f.inputmode ? ' inputmode="' + f.inputmode + '"' : "") + (f.type ? ' type="' + f.type + '"' : "") + ' autocomplete="off">').join("") +
+      '<button class="primary dok">' + esc(okLabel || "تمام") + '</button><button class="cancel dno">إلغاء</button>');
+    const ins = [...box.querySelectorAll(".dlin")];
+    const done = v => { dlgClose(); resolve(v); };
+    const submit = () => {
+      const out = {};
+      for (let i = 0; i < fields.length; i++){
+        const v = ins[i].value.trim(); const k = fields[i].key || String(i);
+        if (fields[i].required && !v){ toast("لازم تكتب " + (fields[i].label || "القيمة"), true); ins[i].focus(); return; }
+        out[k] = v;
+      }
+      done(out);
+    };
+    box.querySelector(".dok").onclick = submit;
+    box.querySelector(".dno").onclick = () => done(null);
+    ins.forEach((inp, i) => inp.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); if (i < ins.length - 1) ins[i + 1].focus(); else submit(); } }));
+    fields.forEach((f, i) => { if (f.suggest) attachSuggest(ins[i], f.suggest); });
+    if (ins[0]) setTimeout(() => ins[0].focus(), 50);
+  });
+}
+async function uiPrompt(msg, def){
+  const r = await uiForm(msg, [{ key: "v", value: def == null ? "" : def }]);
+  return r ? r.v : null;
+}
+function uiConfirm(msg, okLabel){
+  return new Promise(resolve => {
+    const box = dlgOpen('<h3 style="line-height:1.6">' + esc(msg) + '</h3><button class="primary dok">' + esc(okLabel || "أيوه، متأكد") + '</button><button class="cancel dno">لأ، إلغاء</button>');
+    box.querySelector(".dok").onclick = () => { dlgClose(); resolve(true); };
+    box.querySelector(".dno").onclick = () => { dlgClose(); resolve(false); };
+  });
+}
 function fmtDay(ts){ const d = dayOf(ts); return d; }
 function fmtDT(ts){ return String(ts || "").replace("T", " ").slice(0, 16); }
 
@@ -1496,8 +1566,8 @@ function drawCartTotals(){
   cart.forEach((c, idx) => {
     const v = getVariant(c.vid); if (!v) return;
     const row = el("div", "cart-row");
-    row.innerHTML = `<div class="grow"><b>${esc(vName(v))}</b> <span class="muted">${esc(v.size)} ${esc(v.color)}</span>
-      <div class="muted"><span data-a="price" style="text-decoration:underline">${money(c.price)} ج</span> × ${c.qty} = ${money(c.price * c.qty)} ج${c.pp ? " ✔سعر خاص" : ""}</div></div>
+    row.innerHTML = `<div class="grow"><b><bdi>${esc(vName(v))}</bdi></b> <span class="muted"><bdi>${esc(v.size)}</bdi> <bdi>${esc(v.color)}</bdi></span>
+      <div class="muted"><bdi dir="ltr"><span data-a="price" style="text-decoration:underline">${money(c.price)}</span> × ${c.qty} = ${money(c.price * c.qty)} ج</bdi>${c.pp ? " ✔سعر خاص" : ""}</div></div>
       <button data-a="minus">−</button><span class="q">${c.qty}</span><button data-a="plus">+</button><button data-a="del" class="danger">×</button>`;
     row.querySelector('[data-a="minus"]').onclick = () => { c.qty > 1 ? c.qty-- : cart.splice(idx,1); drawCartTotals(); };
     row.querySelector('[data-a="plus"]').onclick = () => { if (c.qty < v.qty) c.qty++; else toast("المخزون مش كفاية", true); drawCartTotals(); };
@@ -1585,7 +1655,7 @@ async function editItemPrice(c, v){
     if (!(await askPin("discount", "تغيير سعر قطعة في الفاتورة"))) return;
     c.pp = true;
   }
-  const val = prompt("سعر البيع للقطعة دي (" + vName(v) + ") — السعر الأصلي " + money(v.price) + " ج:", String(c.price));
+  const val = await uiPrompt("سعر البيع للقطعة دي (" + vName(v) + ") — السعر الأصلي " + money(v.price) + " ج:", String(c.price));
   if (val == null) return;
   const pr = num(val, -1);
   if (pr < 0){ toast("سعر غير صحيح", true); return; }
@@ -1612,13 +1682,13 @@ function pickCustomer(){
     });
   };
   q.addEventListener("input", draw); draw();
-  sh.querySelector("#c-new").onclick = () => {
+  sh.querySelector("#c-new").onclick = async () => {
     const txt = arDigits(q.value).trim();
     let name = txt, phone = "";
-    if (/^\d{6,15}$/.test(txt)){ phone = txt; name = (prompt("اسم العميل:") || "").trim(); }   // كتب رقم: بنسأل عن الاسم
+    if (/^\d{6,15}$/.test(txt)){ phone = txt; name = (await uiPrompt("اسم العميل:") || "").trim(); }   // كتب رقم: بنسأل عن الاسم
     if (!name){ toast("اكتب اسم العميل في الخانة اللي فوق", true); return; }
     if (phone && findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
-    if (!phone && DB.customers.some(x => normText(x.name) === normText(name)) && !confirm("فيه عميل بنفس الاسم ده. تضيف عميل جديد برضه؟")) return;
+    if (!phone && DB.customers.some(x => normText(x.name) === normText(name)) && !await uiConfirm("فيه عميل بنفس الاسم ده. تضيف عميل جديد برضه؟")) return;
     const c = { id: nextId(DB.customers), name, phone, points: 0 };
     DB.customers.push(c); saveSoon(); curCustomer = c; closeModal(); drawCartTotals();
   };
@@ -1626,9 +1696,9 @@ function pickCustomer(){
   sh.querySelector("#c-cancel").onclick = closeModal;
   setTimeout(() => q.focus(), 100);
 }
-function holdCurrentCart(){
+async function holdCurrentCart(){
   if (!cart.length){ toast("السلة فاضية", true); return; }
-  const note = prompt("اسم أو ملاحظة للسلة المعلّقة (اختياري):", curCustomer ? curCustomer.name : "") || "";
+  const note = await uiPrompt("اسم أو ملاحظة للسلة المعلّقة (اختياري):", curCustomer ? curCustomer.name : "") || "";
   holdCart({ cart, customer_id: curCustomer ? curCustomer.id : null, discount: $("#disc").value }, note);
   cart = []; curCustomer = null; $("#disc").value = "";
   drawCartTotals(); toast("اتعلّقت السلة");
@@ -1680,7 +1750,7 @@ async function finish(){
     if (method === "قسط"){
       if (!curCustomer){ toast("اختار العميل الأول للقسط", true); pickCustomer(); return; }
       const owed = DB.installment_plans.filter(p => p.customer_id === curCustomer.id).reduce((q,p) => q + planOutstanding(p.id), 0);
-      if (owed > 0 && !confirm("تنبيه: العميل ده عليه متبقي " + money(owed) + " ج من أقساط قديمة — متأكد عايز تبيع له بالقسط كمان؟")) return;
+      if (owed > 0 && !await uiConfirm("تنبيه: العميل ده عليه متبقي " + money(owed) + " ج من أقساط قديمة — متأكد عايز تبيع له بالقسط كمان؟")) return;
       d.plan = { name: curCustomer.name, phone: curCustomer.phone || "", customer_id: curCustomer.id, down: num($("#downPay").value) };
     } else if ($("#received").value.trim() !== "") d.received = $("#received").value;
     $("#finishBtn").disabled = true;
@@ -1875,8 +1945,8 @@ function drawProdList(){
         <div class="muted">باركود: ${esc(v.barcode)} — بيع ${money(v.price)} — شراء ${showCost ? money(v.cost) : "••••"} — المخزون: <b>${v.qty}</b></div></div>
         <button data-a="label" title="طباعة ليبل">🖨</button><button data-a="edit">تعديل</button>`;
       row.querySelector('[data-a="edit"]').onclick = () => editVariantSheet(v, p);
-      row.querySelector('[data-a="label"]').onclick = () => {
-        const n = Math.max(1, Math.trunc(num(prompt("عدد الملصقات:", "1"), 1)));
+      row.querySelector('[data-a="label"]').onclick = async () => {
+        const n = Math.max(1, Math.trunc(num(await uiPrompt("عدد الملصقات:", "1"), 1)));
         printLabel(v, n);
       };
       box.appendChild(row);
@@ -1894,12 +1964,14 @@ async function setProductImage(p, file){
     saveSoon(); drawProdList(); toast("اتحفظت الصورة");
   } catch (e){ toast("مش قادر أحفظ الصورة", true); }
 }
-function editVariantSheet(v, p){
+async function editVariantSheet(v, p){
   const isNew = !v;
   if (isNew && !p){ // صنف جديد كليًا
-    const name = prompt("اسم الصنف:"); if (!name || !name.trim()) return;
+    const nf = await uiForm("صنف جديد", [{ key: "n", label: "اسم الصنف (لو موجود هيتضاف عليه مقاس/لون)", required: true, suggest: () => DB.products.map(x => ({ label: x.name })) }, { key: "c", label: "القسم (اختياري)" }], "التالي");
+    if (!nf) return;
+    const name = nf.n;
     p = DB.products.find(x => x.name === name.trim());
-    if (!p){ p = { id: nextId(DB.products), name: name.trim(), category: prompt("القسم (اختياري):", "") || "", image: "" }; DB.products.push(p); saveSoon(); }
+    if (!p){ p = { id: nextId(DB.products), name: name.trim(), category: nf.c || "", image: "" }; DB.products.push(p); saveSoon(); }
     v = null;
   }
   v = v || { size: "", color: "", cost: "", price: "", qty: 0, barcode: "" };
@@ -1917,12 +1989,11 @@ function editVariantSheet(v, p){
   if (!isNew) sh.querySelector("#f-moves").onclick = () => { closeModal(); stockMovesSheet(v); };
   if (!isNew) sh.querySelector("#f-adj").onclick = async () => {
     if (!(await gate("edit", "تعديل الكمية"))) return;
-    const dv = prompt("اكتب الزيادة (+) أو النقص (−) للكمية — المخزون الحالي " + v.qty + ":", "0");
-    if (dv == null) return;
-    const d = Math.trunc(num(dv));
+    const af = await uiForm("تعديل الكمية (المخزون الحالي " + v.qty + ")", [{ key: "d", label: "الزيادة (+) أو النقص (−)", value: "0", inputmode: "numeric", required: true }, { key: "r", label: "السبب (جرد / تالف / هدية أو عينة / تصحيح خطأ / أخرى)", value: "تصحيح خطأ" }], "تعديل");
+    if (!af) return;
+    const d = Math.trunc(num(arDigits(af.d)));
     if (!d){ toast("مفيش تعديل", true); return; }
-    const reason = prompt("السبب (جرد / تالف / هدية أو عينة / تصحيح خطأ / أخرى):", "تصحيح خطأ");
-    if (reason == null) return;
+    const reason = af.r;
     try {
       adjustStock(v.id, d, reason.trim() || "أخرى");
       closeModal(); drawProdList(); toast("اتعدّلت الكمية ✔");
@@ -1963,7 +2034,7 @@ function editVariantSheet(v, p){
   };
   if (!isNew) sh.querySelector("#f-del").onclick = async () => {
     if (!(await gate("edit", "حذف صنف"))) return;
-    if (!confirm("متأكد من حذف الصنف؟")) return;
+    if (!await uiConfirm("متأكد من حذف الصنف؟")) return;
     try { await deleteVariantSafe(v.id); closeModal(); drawProdList(); toast("اتمسح"); }
     catch (e){ toast(e.message, true); }
   };
@@ -2024,8 +2095,8 @@ function stockMovesSheet(v){
   const sh = sheet(`<h3>سجل الكمية — ${esc(vName(v))}</h3><div class="list">${lines}</div><button id="m-cancel" class="cancel">قفل</button>`);
   sh.querySelector("#m-cancel").onclick = closeModal;
 }
-function labelsPrintSheet(hits){
-  const n = Math.max(1, Math.trunc(num(prompt("عدد الملصقات لكل صنف في النتايج؟", "1"), 1)));
+async function labelsPrintSheet(hits){
+  const n = Math.max(1, Math.trunc(num(await uiPrompt("عدد الملصقات لكل صنف في النتايج؟", "1"), 1)));
   const parts = [];
   for (const v of hits.slice(0, 60)){
     for (let i = 0; i < n; i++){
@@ -2050,9 +2121,10 @@ function drawCustomers(){
   <div class="scan-row"><input id="cuSearch" placeholder="دوّر بالاسم أو التليفون"><button id="newCustBtn" class="primary">+ عميل</button></div>
   <div id="custList"></div>`;
   $("#cuSearch").addEventListener("input", drawCustList);
-  $("#newCustBtn").onclick = () => {
-    const name = prompt("اسم العميل:"); if (!name || !name.trim()) return;
-    const phone = arDigits(prompt("رقم التليفون (اختياري، سيبه فاضي لو مش عايز):") || "").trim();
+  $("#newCustBtn").onclick = async () => {
+    const f = await uiForm("عميل جديد", [{ key: "n", label: "الاسم (لو ظهر اسم تحت يبقى متسجل قبل كده)", required: true, suggest: () => DB.customers.map(x => ({ label: x.name })) }, { key: "p", label: "رقم التليفون (اختياري)", inputmode: "tel" }], "حفظ العميل");
+    if (!f) return;
+    const name = f.n, phone = arDigits(f.p).trim();
     if (phone && findCustomerByPhone(phone)){ toast("التليفون ده متسجل لعميل تاني", true); return; }
     DB.customers.push({ id: nextId(DB.customers), name: name.trim(), phone, points: 0 });
     saveSoon(); drawCustList(); toast("اتحفظ العميل");
@@ -2117,16 +2189,17 @@ function customerSheet(cid){
   }
   sh.querySelector("#cu-stmt").onclick = () => { closeModal(); showStatement(cid); };
   sh.querySelector("#cu-edit").onclick = async () => {
-    const name = prompt("الاسم:", c.name); if (name == null) return;
-    const phone = prompt("التليفون (اختياري):", c.phone || ""); if (phone == null) return;
+    const f = await uiForm("تعديل العميل", [{ key: "n", label: "الاسم", value: c.name, required: true }, { key: "p", label: "التليفون (اختياري)", value: c.phone || "", inputmode: "tel" }], "حفظ");
+    if (!f) return;
+    const name = f.n, phone = f.p;
     try { await updateCustomer(cid, name, phone); closeModal(); drawCustList(); toast("اتحفظ"); }
     catch (e){ toast(e.message, true); }
   };
   sh.querySelector("#cu-close").onclick = closeModal;
 }
-function collectSheet(pl){
+async function collectSheet(pl){
   const left = planOutstanding(pl.id);
-  const val = prompt(`هيحصل كام؟ (المتبقي على الخطة ${money(left)} ج)`, String(left));
+  const val = await uiPrompt(`هيحصل كام؟ (المتبقي على الخطة ${money(left)} ج)`, String(left));
   if (val == null){ closeModal(); return; }
   try {
     collectInstallment(pl.id, num(val));
@@ -2573,9 +2646,10 @@ function drawPurchases(){
     const mk = el("button", "primary", "＋ فاتورة شراء جديدة"); mk.style.width = "100%"; mk.style.marginBottom = "10px";
     mk.onclick = purchaseSheet; body.appendChild(mk);
     const addS = el("button", null, "＋ مورد جديد"); addS.style.width = "100%"; addS.style.marginBottom = "10px";
-    addS.onclick = () => {
-      const name = prompt("اسم المورد:"); if (!name || !name.trim()) return;
-      const phone = prompt("تليفون المورد (اختياري):", "") || "";
+    addS.onclick = async () => {
+      const f = await uiForm("مورد جديد", [{ key: "n", label: "اسم المورد (لو ظهر اسم تحت يبقى متسجل قبل كده)", required: true, suggest: () => DB.suppliers.map(x => ({ label: x.name })) }, { key: "p", label: "تليفون المورد (اختياري)", inputmode: "tel" }], "حفظ المورد");
+      if (!f) return;
+      const name = f.n, phone = f.p;
       try { addSupplier(name, phone); drawPurchases(); toast("اتحفظ المورد"); } catch (e){ toast(e.message, true); }
     };
     body.appendChild(addS);
@@ -2590,8 +2664,8 @@ function drawPurchases(){
       row.innerHTML = `<div class="grow"><b>${esc(s.name)}</b> <span class="muted">${esc(s.phone || "")}</span>
         <div class="${bal > 0 ? "owed" : "muted"}">${bal > 0 ? "علينا له " + money(bal) + " ج" : bal < 0 ? "له عندنا " + money(-bal) + " ج" : "مفيش مستحقات"}</div></div>
         <button data-a="pay">دفعة</button><button data-a="ret">مرتجع</button><button data-a="stmt">كشف</button>`;
-      row.querySelector('[data-a="pay"]').onclick = () => {
-        const v = prompt(`دفع كام لـ ${s.name}؟ (المتبقي علينا ${money(bal)} ج)`, bal > 0 ? String(bal) : "");
+      row.querySelector('[data-a="pay"]').onclick = async () => {
+        const v = await uiPrompt(`دفع كام لـ ${s.name}؟ (المتبقي علينا ${money(bal)} ج)`, bal > 0 ? String(bal) : "");
         if (v == null) return;
         try { paySupplier(s.id, num(v)); drawPurchases(); toast("اتسجّلت الدفعة"); } catch (e){ toast(e.message, true); }
       };
@@ -2609,22 +2683,34 @@ function drawPurchases(){
 function purchaseSheet(){
   const lines = [];
   const sh = sheet(`<h3>فاتورة شراء جديدة</h3>
-    <input id="pu-sup" placeholder="اسم المورد (جديد أو موجود) *" list="supList"><datalist id="supList"></datalist>
-    <div class="scan-row" style="margin-bottom:4px"><input id="pu-q" placeholder="دوّر على صنف موجود"><button id="pu-find">إضافة</button></div>
+    <label class="dl">المورد (اكتب وهتظهرلك الأسماء) *</label>
+    <input id="pu-sup" placeholder="اسم المورد" autocomplete="off">
+    <label class="dl">أضف صنف موجود</label>
+    <input id="pu-q" placeholder="اكتب اسم الصنف أو الباركود">
+    <button id="pu-find">＋ إضافة الصنف</button>
     <button id="pu-newitem" style="width:100%">＋ صنف جديد مش موجود</button>
     <div id="pu-lines" style="margin-top:8px"></div>
     <div class="row2" style="margin-top:8px"><input id="pu-paid" type="number" inputmode="decimal" placeholder="المدفوع للمورد دلوقتي"></div>
     <div class="muted" id="pu-total"></div>
     <button id="pu-save" class="primary">حفظ الفاتورة</button>
     <button id="pu-cancel" class="cancel">إلغاء</button>`);
-  sh.querySelector("#supList").innerHTML = DB.suppliers.map(s => "<option value='" + esc(s.name) + "'>").join("");
+  attachSuggest(sh.querySelector("#pu-sup"), () => DB.suppliers.map(x => ({ label: x.name })));
   sh.querySelector("#pu-cancel").onclick = closeModal;
+  const pickV = async v => {
+    const f = await uiForm(variantLabel(v), [{ key: "q", label: "الكمية المشتراة", value: "1", inputmode: "numeric", required: true }, { key: "k", label: "سعر شراء القطعة", value: String(v.cost), inputmode: "decimal", required: true }], "إضافة للفاتورة");
+    if (!f) return;
+    const q = Math.trunc(num(arDigits(f.q)));
+    if (!(q > 0)){ toast("الكمية لازم أكبر من صفر", true); return; }
+    const k = num(arDigits(f.k));
+    lines.push({ vid: v.id, q, k }); drawLines();
+  };
+  attachSuggest(sh.querySelector("#pu-q"), qv => (qv.trim() ? searchVariants(qv, 6) : []).map(v => ({ label: variantLabel(v), pre: true, v })), x => { sh.querySelector("#pu-q").value = ""; pickV(x.v); });
   const drawLines = () => {
     const box = sh.querySelector("#pu-lines"); box.innerHTML = "";
     lines.forEach((L, i) => {
       const nm = L.newItem ? L.newItem.name + " " + (L.newItem.size||"") + " " + (L.newItem.color||"") + " (جديد)" : variantLabel(getVariant(L.vid));
       const row = el("div", "cart-row");
-      row.innerHTML = `<div class="grow">${esc(nm)}<div class="muted">${L.q} × ${money(L.k)} = ${money(L.q * L.k)} ج</div></div><button class="danger">×</button>`;
+      row.innerHTML = `<div class="grow"><bdi>${esc(nm)}</bdi><div class="muted"><bdi dir="ltr">${L.q} × ${money(L.k)} = ${money(L.q * L.k)} ج</bdi></div></div><button class="danger">×</button>`;
       row.querySelector("button").onclick = () => { lines.splice(i, 1); drawLines(); };
       box.appendChild(row);
     });
@@ -2633,12 +2719,6 @@ function purchaseSheet(){
   sh.querySelector("#pu-find").onclick = () => {
     const hits = findVariants(sh.querySelector("#pu-q").value);
     if (!hits.length){ toast("مفيش صنف بالاسم ده — دوس «صنف جديد»", true); return; }
-    const pickV = v => {
-      const q = Math.trunc(num(prompt("الكمية المشتراة:", "1")));
-      if (!(q > 0)) return;
-      const k = num(prompt("سعر شراء القطعة:", String(v.cost)));
-      lines.push({ vid: v.id, q, k }); drawLines();
-    };
     if (hits.length === 1) pickV(hits[0]);
     else {
       const sh2 = sheet("<h3>اختار الصنف</h3>");
@@ -2649,15 +2729,18 @@ function purchaseSheet(){
       const c = el("button", "cancel", "إلغاء"); c.onclick = closeModal; sh2.appendChild(c);
     }
   };
-  sh.querySelector("#pu-newitem").onclick = () => {
-    const name = prompt("اسم الصنف الجديد:"); if (!name || !name.trim()) return;
-    const size = prompt("المقاس (اختياري):", "") || "";
-    const color = prompt("اللون (اختياري):", "") || "";
-    const price = num(prompt("سعر البيع:", ""));
+  sh.querySelector("#pu-newitem").onclick = async () => {
+    const f = await uiForm("صنف جديد في الفاتورة", [
+      { key: "n", label: "اسم الصنف", required: true, suggest: () => DB.products.map(x => ({ label: x.name })) }, { key: "s", label: "المقاس (اختياري)" }, { key: "c", label: "اللون (اختياري)" },
+      { key: "pr", label: "سعر البيع", inputmode: "decimal", required: true }, { key: "q", label: "الكمية المشتراة", value: "1", inputmode: "numeric", required: true },
+      { key: "k", label: "سعر شراء القطعة", inputmode: "decimal", required: true }], "إضافة للفاتورة");
+    if (!f) return;
+    const name = f.n, size = f.s, color = f.c;
+    const price = num(arDigits(f.pr));
     if (!(price > 0)){ toast("لازم سعر بيع أكبر من صفر", true); return; }
-    const q = Math.trunc(num(prompt("الكمية المشتراة:", "1")));
-    if (!(q > 0)) return;
-    const k = num(prompt("سعر شراء القطعة:", ""));
+    const q = Math.trunc(num(arDigits(f.q)));
+    if (!(q > 0)){ toast("الكمية لازم أكبر من صفر", true); return; }
+    const k = num(arDigits(f.k));
     lines.push({ newItem: { name: name.trim(), size: size.trim(), color: color.trim(), price }, q, k });
     drawLines();
   };
@@ -2683,10 +2766,12 @@ function supplierReturnSheet(s){
     list.innerHTML = "";
     searchVariants(q.value, 10).forEach(v => {
       const b = el("button", "pick", `${variantLabel(v)} — موجود ${v.qty} — تكلفة ${money(v.cost)}`);
-      b.onclick = () => {
-        const qty = Math.trunc(num(prompt("كمية المرتجع:", "1")));
-        if (!(qty > 0)) return;
-        const amt = prompt("المبلغ اللي هيتحسب ليك (فاضي = الكمية × التكلفة):", "");
+      b.onclick = async () => {
+        const f = await uiForm(variantLabel(v), [{ key: "q", label: "كمية المرتجع", value: "1", inputmode: "numeric", required: true }, { key: "a", label: "المبلغ اللي هيتحسب ليك (فاضي = الكمية × التكلفة)", inputmode: "decimal" }], "تسجيل المرتجع");
+        if (!f) return;
+        const qty = Math.trunc(num(arDigits(f.q)));
+        if (!(qty > 0)){ toast("الكمية لازم أكبر من صفر", true); return; }
+        const amt = arDigits(f.a);
         try {
           const a = doSupplierReturn(s.id, v.id, qty, amt === "" || amt == null ? null : num(amt));
           closeModal(); drawPurchases(); toast("اتسجّل مرتجع " + money(a) + " ج");
@@ -2753,7 +2838,7 @@ function drawExpenses(){
         row.innerHTML = `<div class="grow">${money(e.amount)} ج — ${esc(e.category)}${e.note ? " — " + esc(e.note) : ""}<div class="muted">${e.ts}</div></div><button class="danger">×</button>`;
         row.querySelector("button").onclick = async () => {
           if (!(await gate("edit", "حذف مصروف"))) return;
-          if (!confirm("حذف المصروف ده؟")) return;
+          if (!await uiConfirm("حذف المصروف ده؟")) return;
           await deleteExpense(e.id); drawList(); toast("اتمسح");
         };
         list.appendChild(row);
@@ -2796,7 +2881,7 @@ function drawStocktake(){
       const diffs = Object.keys(counts).filter(k => counts[k] != null && getVariant(k) && counts[k] !== getVariant(k).qty);
       if (!diffs.length){ toast("مفيش فروقات اتكتبت", true); return; }
       if (!(await gate("edit", "اعتماد الجرد"))) return;
-      if (!confirm("اعتماد " + diffs.length + " تسوية مخزون؟")) return;
+      if (!await uiConfirm("اعتماد " + diffs.length + " تسوية مخزون؟")) return;
       for (const k of diffs){ const v = getVariant(k); adjustStock(v.id, counts[k] - v.qty, "جرد"); }
       await logAct("جرد", diffs.length + " صنف اتسوّى");
       countsClear(counts); drawList(); toast("اتعتمد الجرد ✔");
@@ -2844,7 +2929,7 @@ function drawReturns(){
         row.querySelector('[data-a="exc"]').onclick = () => returnSheet(s, true);
         row.querySelector('[data-a="cancel"]').onclick = async () => {
           if (!(await gate("cancel", "إلغاء فاتورة"))) return;
-          if (!confirm("إلغاء الفاتورة " + s.id + " كلها؟ (كل قطعها هترجع المخزون)")) return;
+          if (!await uiConfirm("إلغاء الفاتورة " + s.id + " كلها؟ (كل قطعها هترجع المخزون)")) return;
           const r = await cancelSale(s.id);
           toast(r.msg, !r.ok); if (r.ok) drawList();
         };
@@ -2946,12 +3031,11 @@ function drawEmployees(){
       <div id="emp-pinlog"></div>`;
     body.querySelector("#emp-setpin").onclick = async () => {
       if (pinSet() && !(await askPin(null, "تغيير رقم المدير"))) return;
-      const p1 = prompt("الرقم السري الجديد للمدير (من 4 لـ 8 أرقام):");
-      if (p1 == null) return;
-      const pin = arDigits(p1).trim();
+      const pf = await uiForm("الرقم السري للمدير", [{ key: "a", label: "الرقم الجديد (من 4 لـ 8 أرقام)", type: "password", inputmode: "numeric", required: true }, { key: "b", label: "أكد الرقم تاني", type: "password", inputmode: "numeric", required: true }], "حفظ");
+      if (!pf) return;
+      const pin = arDigits(pf.a).trim();
       if (!/^\d{4,8}$/.test(pin)){ toast("الرقم لازم يبقى من 4 لـ 8 أرقام", true); return; }
-      const p2 = prompt("أكد الرقم تاني:");
-      if (arDigits(p2 || "").trim() !== pin){ toast("الرقمين مش زي بعض", true); return; }
+      if (arDigits(pf.b).trim() !== pin){ toast("الرقمين مش زي بعض", true); return; }
       setSetting("pin_hash", await hashPin2(pin));
       await _pinOkReset(); await logAct("تغيير رقم المدير", "");
       SESSION.manager = true; SESSION.name = "المدير"; SESSION.perms = PERMS.map(p => p[0]);
@@ -2960,7 +3044,7 @@ function drawEmployees(){
     const delPin = body.querySelector("#emp-delpin");
     if (delPin) delPin.onclick = async () => {
       if (!(await askPin(null, "إلغاء الرقم السري"))) return;
-      if (!confirm("إلغاء الرقم السري هيشيل كل القيود — التطبيق هيبقى مفتوح لأي حد. متأكد؟")) return;
+      if (!await uiConfirm("إلغاء الرقم السري هيشيل كل القيود — التطبيق هيبقى مفتوح لأي حد. متأكد؟")) return;
       setSetting("pin_hash", "");
       await _pinOkReset(); await logAct("إلغاء الرقم السري", "");
       SESSION.manager = false; SESSION.name = ""; SESSION.perms = [];
@@ -2970,8 +3054,10 @@ function drawEmployees(){
     if (lockB) lockB.onclick = () => { lockNow(); refreshLock(); drawEmployees(); toast("اتقفل"); };
     body.querySelector("#emp-add").onclick = async () => {
       if (!(await gate(null, "إضافة موظف"))) return;
-      const name = prompt("اسم الموظف:"); if (!name || !name.trim()) return;
-      const pin = arDigits(prompt("رقمه السري (من 4 لـ 8 أرقام):") || "").trim();
+      const ef = await uiForm("موظف جديد", [{ key: "n", label: "اسم الموظف", required: true }, { key: "p", label: "رقمه السري (من 4 لـ 8 أرقام)", type: "password", inputmode: "numeric", required: true }], "التالي");
+      if (!ef) return;
+      const name = ef.n;
+      const pin = arDigits(ef.p).trim();
       const sh = sheet(`<h3>صلاحيات ${esc(name.trim())}</h3><div id="pm-list"></div>
         <button id="pm-ok" class="primary">حفظ الموظف</button><button id="pm-cancel" class="cancel">إلغاء</button>`);
       const list = sh.querySelector("#pm-list");
@@ -3014,14 +3100,16 @@ function drawEmployees(){
       };
       row.querySelector('[data-a="pin"]').onclick = async () => {
         if (!(await gate(null, "تغيير رقم موظف"))) return;
-        const pin = arDigits(prompt("الرقم السري الجديد لـ " + e.name + ":", "") || "").trim();
+        const nf = await uiForm("رقم جديد لـ " + e.name, [{ key: "p", label: "الرقم السري الجديد (من 4 لـ 8 أرقام)", type: "password", inputmode: "numeric", required: true }], "حفظ");
+        if (!nf) return;
+        const pin = arDigits(nf.p).trim();
         if (!/^\d{4,8}$/.test(pin)){ toast("الرقم لازم يبقى من 4 لـ 8 أرقام", true); return; }
         e.pin_hash = await hashPin2(pin); saveSoon(); await logAct("تغيير رقم موظف", e.name);
         toast("اتغيّر الرقم ✔");
       };
       row.querySelector('[data-a="del"]').onclick = async () => {
         if (!(await gate(null, "إيقاف موظف"))) return;
-        if (!confirm("إيقاف الموظف " + e.name + "؟ (مش هيقدر يدخل برقمه تاني)")) return;
+        if (!await uiConfirm("إيقاف الموظف " + e.name + "؟ (مش هيقدر يدخل برقمه تاني)")) return;
         await removeEmployee(e.id); drawEmployees(); toast("اتوقّف");
       };
       listBox.appendChild(row);
@@ -3123,7 +3211,7 @@ function drawBackup(){
         const b = el("button", null, "استرجاع");
         b.onclick = async () => {
           if (!(await gate("settings", "استرجاع نسخة تلقائية"))) return;
-          if (!confirm("استرجاع نسخة يوم " + d + " هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
+          if (!await uiConfirm("استرجاع نسخة يوم " + d + " هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
           try {
             const snap = await loadSnapshot(d);
             if (!snap) throw new Error("النسخة مش موجودة");
@@ -3139,14 +3227,14 @@ function drawBackup(){
     body.querySelector("#bk-imp").addEventListener("change", async e => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
       if (!(await gate("settings", "استيراد نسخة احتياطية"))) return;
-      if (!confirm("الاستيراد هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
+      if (!await uiConfirm("الاستيراد هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
       try { await importData(await f.text()); lockNow(); refreshLock(); applyDark(); drawMore(); toast("النسخة اترجعت ✔"); }
       catch (e2){ toast(e2.message, true); }
     });
     body.querySelector("#bk-desk").addEventListener("change", async e => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
       if (!(await gate("settings", "استيراد نسخة الكمبيوتر"))) return;
-      if (!confirm("استيراد نسخة الكمبيوتر هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
+      if (!await uiConfirm("استيراد نسخة الكمبيوتر هيستبدل كل البيانات الحالية على الموبايل. متأكد؟")) return;
       try {
         toast("بنقرأ نسخة الكمبيوتر...");
         const data = await importDesktopDb(await f.arrayBuffer());
@@ -3170,8 +3258,8 @@ function drawBackup(){
     });
     body.querySelector("#bk-wipe").onclick = async () => {
       if (pinSet() && !(await askPin(null, "مسح كل البيانات"))) return;
-      if (!confirm("ده هيمسح كل البيانات على الموبايل نهائيًا. متأكد؟")) return;
-      if (!confirm("آخر تأكيد: كل الفواتير والأصناف والعملاء هيتمسحوا!")) return;
+      if (!await uiConfirm("ده هيمسح كل البيانات على الموبايل نهائيًا. متأكد؟")) return;
+      if (!await uiConfirm("آخر تأكيد: كل الفواتير والأصناف والعملاء هيتمسحوا!")) return;
       try { await snapshotDaily(true); } catch (e){}   // نقطة رجوع تلقائية قبل المسح
       for (const t of TABLES) DB[t] = [];
       DB.settings = Object.assign({}, DEFAULTS);
